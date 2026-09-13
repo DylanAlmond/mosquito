@@ -26,6 +26,18 @@ pub enum QrError {
     Qr(#[from] qrcode::types::QrError),
 }
 
+#[derive(Debug, Error)]
+pub enum SharerError {
+    #[error("server is already running at {0}")]
+    AlreadyRunning(String),
+    #[error("server is not running")]
+    NotRunning,
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("server task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

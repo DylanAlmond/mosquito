@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::error::SharerError;
 use crate::file_store::{FileId, FileStore, SharedFile};
 use crate::lan::{LanAddress, SystemLanAddress};
 use crate::server::{AppState, router};
@@ -16,18 +16,6 @@ use crate::{AddFileError, RemoveError};
 /// the UI shows whatever actually got bound.
 pub const DEFAULT_PORT: u16 = 8472;
 
-#[derive(Debug, Error)]
-pub enum SharerError {
-    #[error("server is already running at {0}")]
-    AlreadyRunning(String),
-    #[error("server is not running")]
-    NotRunning,
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("server task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
-}
-
 /// Snapshot of server status, shaped for the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServerInfo {
@@ -36,6 +24,20 @@ pub struct ServerInfo {
     pub url: Option<String>,
     pub port: Option<u16>,
     pub lan_ip: Option<IpAddr>,
+}
+
+/// One path that couldn't be added, and why.
+#[derive(Debug, Serialize)]
+pub struct FailedAdd {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+/// Result of a batch add: what made it in, and what didn't.
+#[derive(Debug, Serialize)]
+pub struct AddFilesOutcome {
+    pub added: Vec<SharedFile>,
+    pub failed: Vec<FailedAdd>,
 }
 
 impl ServerInfo {
@@ -105,6 +107,26 @@ impl Sharer {
             .expect("file store not poisoned")
             .list()
             .to_vec()
+    }
+
+    /// Register many files at once (the drag-and-drop case). Never fails
+    /// wholesale: each path succeeds or fails independently, so dropping
+    /// a folder among valid files doesn't reject the files.
+    pub fn add_files(&self, paths: Vec<PathBuf>) -> AddFilesOutcome {
+        let mut outcome = AddFilesOutcome {
+            added: Vec::new(),
+            failed: Vec::new(),
+        };
+        for path in paths {
+            match self.add_file(&path) {
+                Ok(file) => outcome.added.push(file),
+                Err(error) => outcome.failed.push(FailedAdd {
+                    path,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        outcome
     }
 
     // -- lifecycle ------------------------------------------------------

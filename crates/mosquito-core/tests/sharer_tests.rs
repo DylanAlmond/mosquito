@@ -2,6 +2,7 @@
 //! ports, binds, and shutdowns are the thing under test.
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -184,4 +185,38 @@ async fn stop_releases_the_port() {
 
     // Only possible if stop() truly waited for the listener to close.
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+}
+
+#[test]
+fn add_files_splits_successes_and_failures() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("good.txt"), b"x").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let outcome = sharer.add_files(vec![
+        dir.path().join("good.txt"),
+        dir.path().join("missing.txt"),
+        dir.path().to_path_buf(), // the directory itself
+    ]);
+
+    assert_eq!(outcome.added.len(), 1);
+    assert_eq!(outcome.added[0].name, "good.txt");
+    assert_eq!(outcome.failed.len(), 2);
+    assert!(outcome.failed[0].error.contains("does not exist"));
+    assert!(outcome.failed[1].error.contains("directories"));
+}
+
+#[test]
+fn add_files_reports_the_original_path_on_failure() {
+    let sharer = sharer_on("192.0.2.7");
+    let outcome = sharer.add_files(vec![r"C:\Users\nope.txt".into()]);
+    assert_eq!(outcome.failed[0].path, PathBuf::from(r"C:\Users\nope.txt"));
+}
+
+#[test]
+fn add_files_with_no_paths_is_clean() {
+    let sharer = sharer_on("192.0.2.7");
+    let outcome = sharer.add_files(vec![]);
+    assert!(outcome.added.is_empty());
+    assert!(outcome.failed.is_empty());
 }
