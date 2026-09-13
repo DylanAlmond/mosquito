@@ -20,6 +20,12 @@ pub enum RemoveError {
     NotFound(FileId),
 }
 
+#[derive(Debug, Error)]
+pub enum QrError {
+    #[error("qr generation failed: {0}")]
+    Qr(#[from] qrcode::types::QrError),
+}
+
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
