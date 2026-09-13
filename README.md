@@ -1,3 +1,7 @@
+<p>
+  <img src="app-icon.png" alt="App Icon" width="96">
+</p>
+
 # Mosquito
 
 ![Status](https://img.shields.io/badge/Status-WIP-yellow)
