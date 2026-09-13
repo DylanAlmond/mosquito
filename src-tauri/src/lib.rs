@@ -7,6 +7,7 @@ use mosquito_core::{Sharer};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Sharer::new())
         .invoke_handler(tauri::generate_handler![
             list_files,

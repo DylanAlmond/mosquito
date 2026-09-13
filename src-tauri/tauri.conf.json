@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mosquito",
+  "productName": "Mosquito",
   "version": "0.1.0",
   "identifier": "com.karkand.mosquito",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "mosquito",
-        "width": 800,
-        "height": 600
+        "title": "Mosquito",
+        "width": 400,
+        "height": 308,
+        "resizable": false,
+        "decorations": false
       }
     ],
     "security": {
