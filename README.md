@@ -1,12 +1,11 @@
 # Mosquito
 
 ![Status](https://img.shields.io/badge/Status-WIP-yellow)
+![GitHub Release](https://img.shields.io/github/v/release/DylanAlmond/mosquito)
 
 🦟 **Bite-sized file sharing.**
 
 A tiny desktop app for sharing files between devices on the same local network.
-No accounts, no cloud storage, no configuration. Drag files in, scan the QR
-code, download from any device on your Wi-Fi.
 
 ## How it works
 
@@ -33,9 +32,8 @@ with no Tauri dependency which keeps it fully testable with plain
 ```
 mosquito/
 ├── src/                     # Vue frontend
-│   ├── components/          #   DropZone, FileList, SharePanel
+│   ├── components/          #   Header, FileList, SharePanel
 │   ├── composables/         #   useSharer (state), useDragDrop (native drop)
-│   ├── api.ts               #   typed wrappers over the Tauri commands
 │   └── types.ts             #   mirrors of the Rust IPC structs
 ├── src-tauri/               # Tauri shell: thin commands over the core
 └── crates/
@@ -140,46 +138,6 @@ _The compiled installer/binary will be located in `src-tauri/target/release/bund
 - The Wi-Fi network's profile must be **Private** for inbound LAN connections.
 - Docker/WSL virtual adapters can confuse LAN-IP detection. If the URL
   shows a `172.x` address, that's why.
-
-## Design decisions & known limitations (as of now)
-
-On purpose, for now:
-
-- **Everything is in memory**: no database, no transfer history.
-- **Download links are sequential IDs** (`/download/0`), so they're
-  guessable by anyone on the LAN. Trusted-network assumption; secret
-  tokens are later on.
-- **File sizes are snapshotted at add time**: the listing may be stale
-  if a file changes on disk mid-share.
-- **Stop waits for in-flight downloads** (graceful shutdown), so
-  stopping during a large transfer isn't instant.
-- **No HTTPS, no auth**.
-
-## Status
-
-- [x] Files can be dragged into the app
-- [x] Local server starts automatically
-- [x] LAN URL is displayed
-- [x] QR code works
-- [x] Another device can download the files
-- [x] Multiple files work
-- [x] Server can be stopped
-- [x] Closing Mosquito stops the server
-- [x] No internet connection is required
-- [x] No files leave the local network
-
-Verified against the dev build; the release pass re-checks the list
-against the packaged installer.
-
-## Rough Roadmap
-
-- [ ] Password protection
-- [ ] Expiring links
-- [ ] Download progress
-- [ ] Folder sharing
-- [ ] System tray
-- [ ] `.local` hostname
-- [ ] OS context-menu "Share with Mosquito"
 
 ## Contributing
 
