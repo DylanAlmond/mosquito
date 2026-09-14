@@ -89,7 +89,7 @@ always the one that works.
 ```bash
 # Clone the repository
 git clone https://github.com/DylanAlmond/mosquito
-cd lockr
+cd mosquito
 
 # Install frontend dependencies
 yarn install
