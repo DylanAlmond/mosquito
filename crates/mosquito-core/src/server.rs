@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(listing))
         .route("/download/{id}", get(download))
+        .route("/assets/dynapuff-400.woff2", get(font_regular))
+        .route("/assets/dynapuff-600.woff2", get(font_semibold))
+        .route("/assets/favicon.ico", get(favicon))
         .with_state(state)
 }
 
@@ -40,9 +43,30 @@ async fn listing(State(state): State<AppState>) -> impl IntoResponse {
         store.list().to_vec()
     };
 
-    let html = render_listing(&files);
+    let html = render_listing(&files, &device_name());
 
     ([(CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+async fn font_regular() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "font/woff2")],
+        &include_bytes!("assets/dynapuff-latin-400-normal.woff2")[..],
+    )
+}
+
+async fn font_semibold() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "font/woff2")],
+        &include_bytes!("assets/dynapuff-latin-600-normal.woff2")[..],
+    )
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "image/x-icon")],
+        &include_bytes!("assets/favicon.ico")[..],
+    )
 }
 
 async fn download(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
@@ -152,14 +176,24 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
+fn device_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| "Unknown device".to_string())
+}
+
 /// The page a phone sees after scanning the QR code.
-/// Hand-rolled HTML — one page doesn't justify a templating crate.
-fn render_listing(files: &[SharedFile]) -> String {
+fn render_listing(files: &[SharedFile], device_name: &str) -> String {
     let items: String = files
         .iter()
         .map(|f| {
             format!(
-                "<li><a href=\"/download/{id}\">{name}</a> <small>({size})</small></li>",
+                "<li class=\"file-row\"><a href=\"/download/{id}\"><span>{name}</span><small>{size}</small></a></li>",
                 id = f.id.0,
                 name = escape_html(&f.name),
                 size = format_size(f.size),
@@ -167,30 +201,26 @@ fn render_listing(files: &[SharedFile]) -> String {
         })
         .collect();
 
-    let body = if files.is_empty() {
-        "<p>Nothing is being shared right now.</p>".to_string()
+    let (file_count, file_content) = if files.is_empty() {
+        (
+            "Shared files".to_string(),
+            "<p class=\"empty-state\">Nothing is being shared right now.</p>".to_string(),
+        )
     } else {
-        format!(
-            "<p>{count} file{s} available:</p><ul>{items}</ul>",
-            count = files.len(),
-            s = if files.len() == 1 { "" } else { "s" },
+        (
+            format!(
+                "{} file{} available",
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            ),
+            format!("<ul class=\"file-list\">{items}</ul>"),
         )
     };
 
-    format!(
-        "<!DOCTYPE html>\
-         <html lang=\"en\">\
-         <head>\
-           <meta charset=\"utf-8\">\
-           <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-           <title>Mosquito</title>\
-         </head>\
-         <body>\
-           <h1>Mosquito</h1>\
-           {body}\
-         </body>\
-         </html>"
-    )
+    include_str!("listing.html")
+        .replace("{{FILE_COUNT}}", &file_count)
+        .replace("{{DEVICE_NAME}}", &escape_html(device_name))
+        .replace("{{FILE_CONTENT}}", &file_content)
 }
 
 #[cfg(test)]
@@ -254,10 +284,13 @@ mod tests {
 
     #[test]
     fn listing_shows_empty_message_without_links() {
-        let html = render_listing(&[]);
+        let html = render_listing(&[], "test-device");
 
         assert!(html.contains("Nothing is being shared"));
         assert!(!html.contains("<li>"));
+        assert!(html.contains("Shared from test-device"));
+        assert!(html.contains("https://github.com/DylanAlmond/mosquito"));
+        assert!(!html.contains("{{"));
     }
 
     #[test]
@@ -269,11 +302,23 @@ mod tests {
             size: 42,
         }];
 
-        let html = render_listing(&files);
+        let html = render_listing(&files, "test-device");
 
         assert!(html.contains("&lt;script&gt;.txt"));
         assert!(html.contains("href=\"/download/0\""));
         assert!(html.contains("42 B"));
         assert!(!html.contains("<script>"));
+        assert!(
+            html.find("class=\"file-count\"").unwrap() < html.find("class=\"file-list\"").unwrap()
+        );
+        assert!(html.contains("overflow-y: auto"));
+    }
+
+    #[test]
+    fn listing_escapes_the_device_name() {
+        let html = render_listing(&[], "<script>host</script>");
+
+        assert!(html.contains("Shared from &lt;script&gt;host&lt;/script&gt;"));
+        assert!(!html.contains("<script>host</script>"));
     }
 }

@@ -54,6 +54,39 @@ async fn root_page_lists_files_with_links() {
     assert!(html.contains("hello.txt"));
     assert!(html.contains("href=\"/download/0\""));
     assert!(html.contains("2 B"));
+    assert!(html.contains("font-family: 'DynaPuff'"));
+    assert!(html.contains("border-radius: 0.5rem"));
+    assert!(html.contains("class=\"file-row\""));
+    assert!(html.contains("Shared from "));
+    assert!(html.contains("https://github.com/DylanAlmond/mosquito"));
+}
+
+#[tokio::test]
+async fn hosted_page_serves_the_app_fonts_locally() {
+    let app = router(AppState::new(Arc::new(Mutex::new(FileStore::new()))));
+
+    for uri in ["/assets/dynapuff-400.woff2", "/assets/dynapuff-600.woff2"] {
+        let response = get(app.clone(), uri).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "font/woff2");
+
+        let font = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(font.starts_with(b"wOF2"));
+    }
+}
+
+#[tokio::test]
+async fn hosted_page_serves_the_favicon_locally() {
+    let app = router(AppState::new(Arc::new(Mutex::new(FileStore::new()))));
+
+    let response = get(app, "/assets/favicon.ico").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/x-icon");
+
+    let icon = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(icon.starts_with(&[0x00, 0x00, 0x01, 0x00]));
 }
 
 #[tokio::test]

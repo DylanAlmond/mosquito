@@ -76,22 +76,23 @@ async function copyUrl() {
 
       <div class="qr" v-html="qrSvg"></div>
 
-      <p class="url-row">
-        <code class="url">{{ info.url }}</code>
+      <button
+        type="button"
+        :aria-label="copied ? 'Share URL copied' : 'Copy share URL'"
+        :title="copied ? 'Copied' : 'Copy share URL'"
+        :disabled="busy || selecting"
+        class="url-row"
+        @click.stop="copyUrl"
+      >
+        <span class="url-row">
+          <code class="url">{{ info.url }}</code>
 
-        <button
-          type="button"
-          :aria-label="copied ? 'Share URL copied' : 'Copy share URL'"
-          :title="copied ? 'Copied' : 'Copy share URL'"
-          :disabled="busy || selecting"
-          @click.stop="copyUrl"
-        >
           <CopiedIcon v-if="copied" />
           <CopyIcon v-else />
+        </span>
 
-          <span class="sr-only">{{ copied ? 'Copied' : 'Copy URL' }}</span>
-        </button>
-      </p>
+        <span class="sr-only">{{ copied ? 'Copied' : 'Copy URL' }}</span>
+      </button>
     </section>
 
     <Transition name="files">
