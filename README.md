@@ -4,7 +4,7 @@
 
 # Mosquito
 
-![Status](https://img.shields.io/badge/Status-WIP-yellow)
+![GitHub Build](https://img.shields.io/github/actions/workflow/status/DylanAlmond/mosquito/publish.yml)
 ![GitHub Release](https://img.shields.io/github/v/release/DylanAlmond/mosquito)
 
 🦟 **Bite-sized file sharing.**
