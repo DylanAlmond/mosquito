@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
+    <title>Mosquito - {{DEVICE_NAME}}</title>
+    <style>
+      @font-face {
+        font-family: 'DynaPuff';
+        src: url('/assets/dynapuff-400.woff2') format('woff2');
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'DynaPuff';
+        src: url('/assets/dynapuff-600.woff2') format('woff2');
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+      }
+      :root {
+        color-scheme: light;
+        font-family: 'DynaPuff', cursive;
+        color: #000;
+        background: #fff;
+        font-synthesis: none;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        height: 100dvh;
+        margin: 0;
+        padding: 0 1.25rem;
+        background: #fff;
+        color: #000;
+        font-size: 1rem;
+        overflow: hidden;
+      }
+      .page {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        max-width: 25rem;
+        margin: 0 auto;
+      }
+      .page-header {
+        display: flex;
+        flex: 0 0 4rem;
+        align-items: center;
+        justify-content: center;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.25rem;
+        font-weight: 400;
+        line-height: 1;
+      }
+      .listing {
+        overflow: hidden;
+        border: 2px solid #000;
+        border-radius: 0.5rem;
+        background: #fff;
+      }
+      .file-count {
+        display: flex;
+        align-items: center;
+        min-height: 3rem;
+        margin: 0;
+        padding: 0 0.875rem;
+        border-bottom: 2px solid #000;
+        font-weight: 600;
+      }
+      .file-list {
+        margin: 0;
+        height: 100%;
+        padding: 0;
+        overflow-y: auto;
+        list-style: none;
+        overscroll-behavior: contain;
+        scrollbar-color: #000 transparent;
+        scrollbar-width: thin;
+        
+      }
+      .file-list::-webkit-scrollbar {
+        width: 6px;
+      }
+      .file-list::-webkit-scrollbar-thumb {
+        border-radius: 9999px;
+        background: #000;
+      }
+      .file-row + .file-row {
+        border-top: 1px solid #000;
+      }
+      .file-row a {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        min-height: 3rem;
+        padding: 0.5rem 0.875rem;
+        color: inherit;
+        text-decoration: none;
+        transition:
+          background-color 140ms ease,
+          color 140ms ease;
+      }
+      .file-row a:hover,
+      .file-row a:focus-visible {
+        background: #000;
+        color: #fff;
+      }
+      .file-row a:focus-visible {
+        outline: 2px solid #777;
+        outline-offset: -4px;
+      }
+      .file-row span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .file-row small {
+        flex: 0 0 auto;
+        font-size: 0.75rem;
+      }
+      .empty-state {
+        margin: 0;
+        padding: 1rem 0.875rem;
+      }
+      .page-footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.35rem 0.75rem;
+        margin-top: auto;
+        padding: 1.5rem 0 1.5rem;
+        color: #777;
+        font-size: 0.75rem;
+        text-align: center;
+      }
+      .page-footer a {
+        color: inherit;
+      }
+      .page-footer a:hover,
+      .page-footer a:focus-visible {
+        color: #000;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .file-row a {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header"><h1>Mosquito</h1></header>
+      <section class="listing" aria-label="Shared files">
+        <p class="file-count">{{FILE_COUNT}}</p>
+        {{FILE_CONTENT}}
+      </section>
+      <footer class="page-footer">
+        <span>Shared from {{DEVICE_NAME}}</span>
+        <a href="https://github.com/DylanAlmond/mosquito" target="_blank" rel="noopener">GitHub</a>
+      </footer>
+    </main>
+  </body>
+</html>

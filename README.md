@@ -44,7 +44,9 @@ mosquito/
     └── mosquito-core/       # the app, minus the GUI
         ├── src/
         │   ├── file_store.rs    # in-memory registry of shared files
-        │   ├── server.rs        # axum routes, streaming downloads, listing page
+        │   ├── server.rs        # axum routes and streaming downloads
+        │   ├── listing.html     # hosted file-listing page template
+        │   ├── assets/          # bundled DynaPuff fonts and license
         │   ├── sharer.rs        # server lifecycle state machine, batch adds
         │   ├── lan.rs           # LAN IP detection (trait, mockable in tests)
         │   └── qr.rs            # QR-as-SVG generation
