@@ -1,14 +1,65 @@
 mod commands;
+#[cfg(all(windows, not(debug_assertions)))]
+mod shell;
 
 use crate::commands::*;
-use mosquito_core::{Sharer};
+use mosquito_core::Sharer;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager};
+
+pub struct PendingShareFiles(Mutex<Vec<String>>);
+
+impl PendingShareFiles {
+    fn new(paths: Vec<String>) -> Self {
+        Self(Mutex::new(paths))
+    }
+
+    fn append(&self, paths: Vec<String>) {
+        self.0
+            .lock()
+            .expect("pending share files lock poisoned")
+            .extend(paths);
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().expect("pending share files lock poisoned"))
+    }
+}
+
+fn share_paths(args: impl Iterator<Item = String>) -> Vec<String> {
+    let mut args = args.skip_while(|arg| arg != "--share");
+    if args.next().is_none() {
+        return Vec::new();
+    }
+    args.collect()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        let paths = share_paths(argv.into_iter().skip(1));
+        if paths.is_empty() {
+            return;
+        }
+
+        app.state::<PendingShareFiles>().append(paths);
+        let _ = app.emit("share-files-requested", ());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Sharer::new())
+        .manage(PendingShareFiles::new(share_paths(
+            std::env::args().skip(1),
+        )))
         .invoke_handler(tauri::generate_handler![
             list_files,
             add_files,
@@ -16,8 +67,41 @@ pub fn run() {
             start_server,
             stop_server,
             get_server_info,
-            get_qr
+            get_qr,
+            take_pending_share_paths,
+            register_context_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{share_paths, PendingShareFiles};
+
+    #[test]
+    fn share_paths_collects_every_argument_after_the_flag() {
+        let args = ["--share", r"C:\Files\one.txt", r"C:\Files\two.txt"]
+            .into_iter()
+            .map(str::to_string);
+
+        assert_eq!(
+            share_paths(args),
+            [r"C:\Files\one.txt", r"C:\Files\two.txt"]
+        );
+    }
+
+    #[test]
+    fn share_paths_ignores_regular_launches() {
+        assert!(share_paths(["--normal"].into_iter().map(str::to_string)).is_empty());
+    }
+
+    #[test]
+    fn pending_share_files_are_drained_once() {
+        let pending = PendingShareFiles::new(vec!["first.txt".into()]);
+        pending.append(vec!["second.txt".into()]);
+
+        assert_eq!(pending.take(), ["first.txt", "second.txt"]);
+        assert!(pending.take().is_empty());
+    }
 }

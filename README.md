@@ -19,6 +19,10 @@ A tiny desktop app for sharing files between devices on the same local network.
 4. Another device scans the code and downloads the files
 5. **Stop Sharing**, removing the last file, or closing the app shuts the server down
 
+On Windows, right-click one or more files in File Explorer and choose
+**Share with Mosquito**. The per-user context-menu option is registered when
+Mosquito is first opened and launches the app with each selected file.
+
 ## Tech stack
 
 - Tauri: desktop shell

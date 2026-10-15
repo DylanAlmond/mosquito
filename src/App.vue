@@ -1,16 +1,44 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import SharePanel from './components/SharePanel.vue';
 import { useSharer } from './composables/useSharer';
 import { useWindowHeight } from './composables/useWindowHeight';
 import Header from './components/Header.vue';
 
-const { failedAdds, error, init, dismissFailed } = useSharer();
+const { failedAdds, error, init, addPaths, dismissFailed } = useSharer();
 const shell = ref<HTMLElement | null>(null);
+let stopListening: (() => void) | undefined;
+let pendingFilesProcessing = Promise.resolve();
 
 useWindowHeight(shell);
 
-onMounted(init);
+function processPendingShareFiles() {
+  pendingFilesProcessing = pendingFilesProcessing
+    .then(async () => {
+      const paths = await invoke<string[]>('take_pending_share_paths');
+      if (paths.length) await addPaths(paths);
+    })
+    .catch((e: unknown) => {
+      error.value = String(e);
+    });
+  return pendingFilesProcessing;
+}
+
+async function initialize() {
+  try {
+    await init();
+    stopListening = await listen('share-files-requested', processPendingShareFiles);
+    await processPendingShareFiles();
+    await invoke<void>('register_context_menu');
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+onMounted(initialize);
+onUnmounted(() => stopListening?.());
 </script>
 
 <template>
