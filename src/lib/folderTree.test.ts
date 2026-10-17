@@ -64,6 +64,8 @@ describe('buildFolderTree', () => {
     expect(root.children[0]!.depth).toBe(1);
     expect(root.children[0]!.children.map((c) => c.subPath)).toEqual(['travel/beach']);
     expect(root.children[0]!.children[0]!.depth).toBe(2);
+    // Subfolder nodes inherit the root's absolute path.
+    expect(root.children[0]!.children[0]!.folderRoot).toBe(photos);
     expect(root.children[0]!.children[0]!.files.map((f) => f.id)).toEqual([1]);
   });
 

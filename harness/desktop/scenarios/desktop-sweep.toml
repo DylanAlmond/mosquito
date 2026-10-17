@@ -71,6 +71,21 @@ selector = ".file-row"
 expected = 3
 
 [[step]]
+name = "the expanded root paints its region with the shared shade"
+action = "assert-exists"
+target = ".folder-row.shade-1"
+
+[[step]]
+name = "the direct member sits inside the shaded region"
+action = "assert-exists"
+target = '.file-row.shade-1 [aria-label="Select sunrise.jpg"]'
+
+[[step]]
+name = "loose files stay on the plain surface"
+action = "assert-exists"
+target = '.file-row:not(.shade-1) [aria-label="Select beach-notes.txt"]'
+
+[[step]]
 name = "expand the nested subfolder"
 action = "click"
 target = '[aria-label="Expand travel"]'
@@ -85,6 +100,11 @@ expected = 4
 name = "the folded member joins the list"
 action = "assert-exists"
 target = '[aria-label="Select beach.jpg"]'
+
+[[step]]
+name = "the nested region alternates back to the plain surface"
+action = "assert-exists"
+target = '.file-row:not(.shade-1) [aria-label="Select beach.jpg"]'
 
 [[step]]
 name = "capture the expanded tree"

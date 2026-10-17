@@ -477,7 +477,7 @@ fn render_listing(files: &[SharedFile], device_name: &str) -> String {
         items.push_str(&file_row_html(file, None));
     }
     for (root_index, root) in tree.roots.iter().enumerate() {
-        render_folder(root, root_index, &mut items, true);
+        render_folder(root, root_index, &mut items, true, 0);
     }
 
     let (header, list_html) = if files.is_empty() {
@@ -538,32 +538,43 @@ fn expanded_shade(depth: usize) -> u8 {
 /// All file ids under `node` — its own members plus every nested
 /// subfolder's, collapsed members included, so a folder checkbox acts
 /// on the full subtree whatever is visible.
-fn subtree_ids(node: &FolderNode<'_>) -> String {
-    let mut ids: Vec<String> = node
-        .files
-        .iter()
-        .map(|file| file.id.0.to_string())
-        .collect();
+fn subtree_ids(node: &FolderNode<'_>, out: &mut Vec<u64>) {
+    out.extend(node.files.iter().map(|file| file.id.0));
     for child in &node.children {
-        ids.extend(
-            subtree_ids(child)
-                .split(',')
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-        );
+        subtree_ids(child, out);
     }
-    ids.join(",")
 }
 
-/// One folder tree node as an expandable row, then its contents in
-/// order: files first, subfolders after. `visible` is what the default
-/// expansion makes of the region: a root is visible with its contents
-/// shown; a subfolder row shows while its members (and nested rows)
-/// render hidden for the enhancement script to reveal.
-fn render_folder(node: &FolderNode<'_>, root_index: usize, items: &mut String, visible: bool) {
+fn subtree_ids_string(node: &FolderNode<'_>) -> String {
+    let mut ids = Vec::new();
+    subtree_ids(node, &mut ids);
+    ids.iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// What the default expansion makes of the region: a root is visible
+/// with its contents shown; a subfolder row shows while its members
+/// (and nested rows) render hidden for the enhancement script to
+/// reveal. `parent_shade` is the region shade the row fell out of — a
+/// collapsed folder row keeps its parent's background like the desktop
+/// does.
+fn render_folder(
+    node: &FolderNode<'_>,
+    root_index: usize,
+    items: &mut String,
+    visible: bool,
+    parent_shade: u8,
+) {
     let key = folder_key(root_index, &node.sub_path);
-    let region_shade = expanded_shade(node.depth);
+    let expanded_region = expanded_shade(node.depth);
     let expanded_default = node.depth == 0;
+    let row_shade = if expanded_default {
+        expanded_region
+    } else {
+        parent_shade
+    };
 
     let name = escape_html(&node.name);
     items.push_str(&format!(
@@ -577,8 +588,8 @@ fn render_folder(node: &FolderNode<'_>, root_index: usize, items: &mut String, v
 <span class=\"folder-name\">{name}</span></li>",
         hidden = if visible { "" } else { " hidden" },
         depth = node.depth,
-        shade = region_shade,
-        subtree = subtree_ids(node),
+        shade = row_shade,
+        subtree = subtree_ids_string(node),
         expanded = if expanded_default { "true" } else { "false" },
         chevron_label = if expanded_default { "Collapse" } else { "Expand" },
         chevron_svg = CHEVRON_SVG,
@@ -592,31 +603,44 @@ fn render_folder(node: &FolderNode<'_>, root_index: usize, items: &mut String, v
     // re-shades whatever it reveals. Subfolders are collapsed by
     // default, so everything beneath a subfolder renders hidden.
     let child_visible = visible && expanded_default;
-    let content_shade = expanded_shade(node.depth);
     for file in &node.files {
         items.push_str(&file_row_html(
             file,
-            Some((node.depth + 1, content_shade, child_visible)),
+            Some(&RowContext {
+                depth: node.depth + 1,
+                shade: expanded_region,
+                visible: child_visible,
+            }),
         ));
     }
     for child in &node.children {
-        render_folder(child, root_index, items, child_visible);
+        render_folder(child, root_index, items, child_visible, row_shade);
     }
+}
+
+/// Region context a tree member row renders with: its depth, the shade
+/// of the region that would show it, and whether the default expansion
+/// shows it.
+struct RowContext {
+    depth: usize,
+    shade: u8,
+    visible: bool,
 }
 
 /// One selectable file row: a plain download link (works without
 /// JavaScript) wrapped around the name and size, with the selection
 /// checkbox beside it — revealed only when JavaScript runs. Tree
-/// members pass their depth, the shade the client paints them with,
-/// and whether the default expansion shows them; loose files sit
-/// outside any tree and carry none of that.
-fn file_row_html(file: &SharedFile, tree_row: Option<(usize, u8, bool)>) -> String {
+/// members pass a [`RowContext`]; loose files sit outside any tree and
+/// carry none of that.
+fn file_row_html(file: &SharedFile, tree_row: Option<&RowContext>) -> String {
     let title = file.name.as_str();
 
     let attrs = match tree_row {
-        Some((depth, shade, visible)) => format!(
+        Some(context) => format!(
             " data-depth=\"{depth}\" data-shade=\"{shade}\"{hidden}",
-            hidden = if visible { "" } else { " hidden" },
+            depth = context.depth,
+            shade = context.shade,
+            hidden = if context.visible { "" } else { " hidden" },
         ),
         None => String::new(),
     };
@@ -878,9 +902,11 @@ mod tests {
 
         // The `notes` subfolder row itself is visible but collapsed, and
         // its members are rendered hidden for the enhancement script to
-        // reveal.
+        // reveal. A collapsed folder row keeps its parent's background
+        // (story 10) — here the grey of the expanded root's region.
         assert!(html.contains("aria-expanded=\"false\""));
         assert!(html.contains("aria-label=\"Expand notes\""));
+        assert!(html.contains("data-folder-key=\"f0/notes\" data-shade=\"1\""));
         let collapsed_member = html
             .find("<li class=\"file-row\" role=\"row\" data-depth=\"2\" data-shade=\"0\" hidden")
             .expect("collapsed members render hidden");

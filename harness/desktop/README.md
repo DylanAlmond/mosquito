@@ -88,9 +88,9 @@ the fixture files and queues their paths in the production
 `PendingShareFiles` buffer, then emits `share-files-requested` — the
 frontend drains it through the same `add_paths` flow as a real
 drop/pick, including server start. Scenario coverage: the folder tree
-(expansion defaults, chevron toggling, subtree selection counting
-folded members), selection (row + folder + select-all), bulk removal,
-and the return to the empty dropzone.
+(expansion defaults, chevron toggling, region shading, subtree
+selection counting folded members), selection (row + folder +
+select-all), bulk removal, and the return to the empty dropzone.
 
 ## Release safety
 

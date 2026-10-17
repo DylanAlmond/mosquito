@@ -361,6 +361,12 @@ function removeSelected() {
   transform: rotate(180deg);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .folder-chevron svg {
+    transition: none;
+  }
+}
+
 .file-row:hover,
 .file-row.is-selected {
   background: var(--ink);

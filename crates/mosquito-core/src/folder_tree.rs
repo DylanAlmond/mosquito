@@ -46,7 +46,8 @@ pub fn build_folder_tree(files: &[SharedFile]) -> FolderTree<'_> {
     /// borrowed file references.
     struct Node {
         name: String,
-        /// Only set on root nodes (depth 0).
+        /// Set for every node: roots carry their own path, subfolders
+        /// inherit it (matching the TypeScript mirror).
         folder_root: PathBuf,
         sub_path: String,
         depth: usize,
@@ -114,7 +115,10 @@ pub fn build_folder_tree(files: &[SharedFile]) -> FolderTree<'_> {
                     let index = arena.len();
                     arena.push(Node {
                         name: (*segment).to_string(),
-                        folder_root: PathBuf::new(),
+                        // Subfolder nodes inherit the root's absolute
+                        // path, like the TypeScript mirror's
+                        // `folderRoot` field does.
+                        folder_root: provenance.folder_root.clone(),
                         sub_path: walked.clone(),
                         depth: arena[current].depth + 1,
                         files: Vec::new(),
@@ -264,6 +268,8 @@ mod tests {
         let beach = &child(&child(root, "travel"), "beach");
         assert_eq!(beach.sub_path, "travel/beach");
         assert_eq!(beach.depth, 2);
+        // Subfolder nodes inherit the root's absolute path.
+        assert_eq!(beach.folder_root, root.folder_root);
         assert_eq!(ids(&beach.files), [1]);
     }
 
