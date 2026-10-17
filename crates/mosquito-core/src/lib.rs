@@ -1,7 +1,9 @@
+mod archive_planner;
 mod error;
 mod file_store;
 mod folder_tree;
 mod lan;
+mod listing;
 mod qr;
 mod server;
 mod sharer;
