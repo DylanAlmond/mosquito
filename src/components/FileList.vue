@@ -4,10 +4,30 @@ import CheckedIcon from '../assets/square-rounded-check.svg';
 import UncheckedIcon from '../assets/square-rounded.svg';
 import TrashIcon from '../assets/trash-x.svg';
 import { useSharer } from '../composables/useSharer';
+import { groupSharedFiles, type FolderGroup } from '../lib/folderGroups';
+import type { SharedFile } from '../types';
 
 const { files, busy, remove, removeMany } = useSharer();
 
 const selectedIds = ref<number[]>([]);
+
+/// Grouping is derived at render time (ADR-0001); the store stays flat.
+/// Members keep their position in the shared list, so groups appear in
+/// first-appearance order. Loose files lead, ungrouped.
+const grouped = computed(() => groupSharedFiles(files.value));
+
+type Row = { kind: 'header'; group: FolderGroup } | { kind: 'file'; file: SharedFile };
+
+const rows = computed<Row[]>(() => {
+  const { loose, groups } = grouped.value;
+  return [
+    ...loose.map((file): Row => ({ kind: 'file', file })),
+    ...groups.flatMap((group): Row[] => [
+      { kind: 'header', group },
+      ...group.files.map((file): Row => ({ kind: 'file', file }))
+    ])
+  ];
+});
 
 const allSelected = computed(
   () => files.value.length > 0 && selectedIds.value.length === files.value.length
@@ -34,6 +54,31 @@ function toggleFile(id: number) {
   } else {
     selectedIds.value = [...selectedIds.value, id];
   }
+}
+
+/// Cosmetic grouping: selection always operates on individual file ids,
+/// so group headers toggle members in bulk but own nothing themselves.
+function groupCheckState(group: FolderGroup): 'checked' | 'mixed' | 'unchecked' {
+  if (group.files.every((file) => selectedIds.value.includes(file.id))) return 'checked';
+  if (group.files.some((file) => selectedIds.value.includes(file.id))) return 'mixed';
+  return 'unchecked';
+}
+
+function toggleGroup(group: FolderGroup) {
+  const memberIds = group.files.map((file) => file.id);
+
+  if (groupCheckState(group) === 'checked') {
+    selectedIds.value = selectedIds.value.filter((id) => !memberIds.includes(id));
+  } else {
+    const unselected = memberIds.filter((id) => !selectedIds.value.includes(id));
+    selectedIds.value = [...selectedIds.value, ...unselected];
+  }
+}
+
+/// Inside a group the file shows where it hangs under the folder root;
+/// loose files keep their basename (the full path stays in the row title).
+function memberTitle(file: SharedFile) {
+  return file.provenance?.relative_path ?? file.name;
 }
 
 function toggleAll() {
@@ -84,39 +129,62 @@ function removeSelected() {
     </div>
 
     <ul class="file-rows thin-scrollbar" role="rowgroup">
-      <li
-        v-for="file in files"
-        :key="file.id"
-        class="file-row"
-        :class="{ 'is-selected': isSelected(file.id) }"
-        :title="file.path"
-        role="row"
-        :aria-selected="isSelected(file.id)"
-        @click="toggleFile(file.id)"
-      >
-        <button
-          type="button"
-          role="checkbox"
-          :aria-checked="isSelected(file.id)"
-          :aria-label="`${isSelected(file.id) ? 'Deselect' : 'Select'} ${file.name}`"
-          :disabled="busy"
-          @click.stop="toggleFile(file.id)"
+      <template v-for="row in rows" :key="row.kind === 'header' ? row.group.folderRoot : row.file.id">
+        <li
+          v-if="row.kind === 'header'"
+          class="group-header"
+          role="row"
+          :title="row.group.folderRoot"
         >
-          <CheckedIcon v-if="isSelected(file.id)" />
-          <UncheckedIcon v-else />
-        </button>
+          <button
+            class="checkbox-control"
+            type="button"
+            role="checkbox"
+            :aria-checked="groupCheckState(row.group) === 'checked' ? 'true' : groupCheckState(row.group) === 'mixed' ? 'mixed' : 'false'"
+            :aria-label="`Select or deselect all files in ${row.group.name}`"
+            :disabled="busy"
+            @click="toggleGroup(row.group)"
+          >
+            <CheckedIcon v-if="groupCheckState(row.group) === 'checked'" />
+            <UncheckedIcon v-else />
+          </button>
 
-        <span class="file-name">{{ file.name }}</span>
+          <span class="group-name">{{ row.group.name }}</span>
+        </li>
 
-        <button
-          type="button"
-          :aria-label="`Delete ${file.name}`"
-          :disabled="busy"
-          @click.stop="removeOne(file.id)"
+        <li
+          v-else
+          class="file-row"
+          :class="{ 'is-selected': isSelected(row.file.id) }"
+          :title="row.file.path"
+          role="row"
+          :aria-selected="isSelected(row.file.id)"
+          @click="toggleFile(row.file.id)"
         >
-          <TrashIcon />
-        </button>
-      </li>
+          <button
+            type="button"
+            role="checkbox"
+            :aria-checked="isSelected(row.file.id)"
+            :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${memberTitle(row.file)}`"
+            :disabled="busy"
+            @click.stop="toggleFile(row.file.id)"
+          >
+            <CheckedIcon v-if="isSelected(row.file.id)" />
+            <UncheckedIcon v-else />
+          </button>
+
+          <span class="file-name">{{ memberTitle(row.file) }}</span>
+
+          <button
+            type="button"
+            :aria-label="`Delete ${memberTitle(row.file)}`"
+            :disabled="busy"
+            @click.stop="removeOne(row.file.id)"
+          >
+            <TrashIcon />
+          </button>
+        </li>
+      </template>
     </ul>
   </section>
 </template>
@@ -162,8 +230,28 @@ function removeSelected() {
     color 140ms ease;
 }
 
-.file-row + .file-row {
+/* Rows and group headers are flat siblings; every row but the first gets
+   a top border, no matter what kind of row precedes it. */
+.file-rows > li:not(:first-child) {
   border-top: 1px solid var(--ink);
+}
+
+.group-header {
+  grid-template-columns: 32px minmax(0, 1fr);
+  min-height: 38px;
+  padding: 0 10px;
+  background: #f1f1f1;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-row:hover,
