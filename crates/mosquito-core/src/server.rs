@@ -17,7 +17,8 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::file_store::{FileId, FileStore, FolderProvenance, SharedFile};
+use crate::file_store::{FileId, FileStore, SharedFile};
+use crate::folder_tree::{FolderNode, build_folder_tree};
 
 /// State shared by every handler. Cheap to clone (it's an Arc).
 #[derive(Clone)]
@@ -456,69 +457,27 @@ fn device_name() -> String {
 /// The page a phone sees after scanning the QR code.
 ///
 /// Rendering mirrors the desktop list (`FileList.vue`): file checkboxes
-/// plus a select-all use the app's checkbox styling, folder groups are
-/// slim header rows with member rows below them, and the action button
-/// where the app has "Delete selected" is the icon-only download button.
+/// plus a select-all use the app's checkbox styling, folders render as
+/// expandable tree rows (the Rust mirror of `folderTree.ts`, ADR-0002),
+/// and the action button where the app has "Delete selected" is the
+/// icon-only download button.
+///
+/// The server emits the default expansion: folder roots expanded,
+/// subfolders collapsed (their members rendered `hidden` so the
+/// enhancement script can reveal them without any dynamic markup). The
+/// script assumes JavaScript is present, like the checkboxes already do.
 fn render_listing(files: &[SharedFile], device_name: &str) -> String {
-    // Grouping is derived at render time (ADR-0001): loose files lead,
-    // then one group per distinct folder root in first-appearance
-    // order — the desktop list's exact layout.
-    //
-    /// One folder group's rendered header + member rows.
-    struct GroupHtml {
-        html: String,
+    // Folder tree derivation at render time (ADR-0002): loose files
+    // lead, then one root node per distinct folder root in
+    // first-appearance order — the desktop list's exact layout.
+    let tree = build_folder_tree(files);
+
+    let mut items = String::new();
+    for file in &tree.loose {
+        items.push_str(&file_row_html(file, None));
     }
-
-    let mut loose = String::new();
-    let mut groups: Vec<GroupHtml> = Vec::new();
-    // Keys are the root's lossy string form. Two distinct non-UTF-8
-    // roots could collapse into one group; the desktop's string-keyed
-    // `folderRoot` grouping is shaped the same, so parity keeps the two
-    // pages aligned.
-    let mut group_index: HashMap<String, usize> = HashMap::new();
-
-    for file in files {
-        match &file.provenance {
-            None => loose.push_str(&file_row_html(file, None)),
-            Some(provenance) => {
-                let root = provenance.folder_root.to_string_lossy().into_owned();
-
-                let index = match group_index.get(&root) {
-                    Some(&index) => index,
-                    None => {
-                        let display_name = provenance
-                            .folder_root
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let index = groups.len();
-                        groups.push(GroupHtml {
-                            html: format!(
-                                "<li class=\"group-header\" role=\"row\" data-group-index=\"{index}\">\
-<button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select all files in {name}\" data-select-group=\"{index}\" hidden>\
-{unchecked_svg}{checked_svg}\
-</button>\
-<span class=\"group-name\">{name}</span></li>",
-                                name = escape_html(&display_name),
-                                unchecked_svg = UNCHECKED_BOX_SVG,
-                                checked_svg = CHECKED_BOX_SVG,
-                            ),
-                        });
-                        group_index.insert(root, index);
-                        index
-                    }
-                };
-
-                groups[index]
-                    .html
-                    .push_str(&file_row_html(file, Some((provenance, index))));
-            }
-        }
-    }
-
-    let mut items = loose;
-    for group in groups {
-        items.push_str(&group.html);
+    for (root_index, root) in tree.roots.iter().enumerate() {
+        render_folder(root, root_index, &mut items, true);
     }
 
     let (header, list_html) = if files.is_empty() {
@@ -557,26 +516,113 @@ fn render_listing(files: &[SharedFile], device_name: &str) -> String {
         .replace("{{FILE_CONTENT}}", &list_html)
 }
 
+/// Stable key tying a folder row to its chevron: the root's render-order
+/// index, plus the subfolder path for nested rows. Same-named roots get
+/// different indices, so keys never collide.
+fn folder_key(root_index: usize, sub_path: &str) -> String {
+    if sub_path.is_empty() {
+        format!("f{root_index}")
+    } else {
+        format!("f{root_index}/{sub_path}")
+    }
+}
+
+/// Shading (ADR-0002): a whole expanded region paints grey at even
+/// depth, falls back to the plain surface at odd — alternating per
+/// nesting level, never by indentation. The server paints the default
+/// expansion: the client recomputes on every toggle.
+fn expanded_shade(depth: usize) -> u8 {
+    if depth % 2 == 0 { 1 } else { 0 }
+}
+
+/// All file ids under `node` — its own members plus every nested
+/// subfolder's, collapsed members included, so a folder checkbox acts
+/// on the full subtree whatever is visible.
+fn subtree_ids(node: &FolderNode<'_>) -> String {
+    let mut ids: Vec<String> = node
+        .files
+        .iter()
+        .map(|file| file.id.0.to_string())
+        .collect();
+    for child in &node.children {
+        ids.extend(
+            subtree_ids(child)
+                .split(',')
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        );
+    }
+    ids.join(",")
+}
+
+/// One folder tree node as an expandable row, then its contents in
+/// order: files first, subfolders after. `visible` is what the default
+/// expansion makes of the region: a root is visible with its contents
+/// shown; a subfolder row shows while its members (and nested rows)
+/// render hidden for the enhancement script to reveal.
+fn render_folder(node: &FolderNode<'_>, root_index: usize, items: &mut String, visible: bool) {
+    let key = folder_key(root_index, &node.sub_path);
+    let region_shade = expanded_shade(node.depth);
+    let expanded_default = node.depth == 0;
+
+    let name = escape_html(&node.name);
+    items.push_str(&format!(
+        "<li class=\"folder-row\" role=\"row\"{hidden} data-depth=\"{depth}\" data-folder-key=\"{key}\" data-shade=\"{shade}\">\
+<button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select all files in {name}\" data-subtree=\"{subtree}\" hidden>\
+{unchecked_svg}{checked_svg}\
+</button>\
+<button type=\"button\" class=\"folder-chevron\" aria-expanded=\"{expanded}\" aria-label=\"{chevron_label} {name}\" data-toggle=\"{key}\" hidden>\
+{chevron_svg}\
+</button>\
+<span class=\"folder-name\">{name}</span></li>",
+        hidden = if visible { "" } else { " hidden" },
+        depth = node.depth,
+        shade = region_shade,
+        subtree = subtree_ids(node),
+        expanded = if expanded_default { "true" } else { "false" },
+        chevron_label = if expanded_default { "Collapse" } else { "Expand" },
+        chevron_svg = CHEVRON_SVG,
+        unchecked_svg = UNCHECKED_BOX_SVG,
+        checked_svg = CHECKED_BOX_SVG,
+    ));
+
+    // Rows show the file's name; where it hangs under the root is the
+    // tree's job (desktop `memberTitle()`). Content rows take the
+    // region shade of the folder that would show them; the client
+    // re-shades whatever it reveals. Subfolders are collapsed by
+    // default, so everything beneath a subfolder renders hidden.
+    let child_visible = visible && expanded_default;
+    let content_shade = expanded_shade(node.depth);
+    for file in &node.files {
+        items.push_str(&file_row_html(
+            file,
+            Some((node.depth + 1, content_shade, child_visible)),
+        ));
+    }
+    for child in &node.children {
+        render_folder(child, root_index, items, child_visible);
+    }
+}
+
 /// One selectable file row: a plain download link (works without
 /// JavaScript) wrapped around the name and size, with the selection
-/// checkbox beside it — revealed only when JavaScript runs. Members of
-/// a folder group pass their provenance plus the group's render-order
-/// index, which links the row to its group's checkbox.
-fn file_row_html(file: &SharedFile, group: Option<(&FolderProvenance, usize)>) -> String {
-    // Inside a group the row shows where it hangs under the folder
-    // root; loose files keep their display name (desktop
-    // `memberTitle()`).
-    let title = match group {
-        Some((provenance, _)) => provenance.relative_path.as_str(),
-        None => file.name.as_str(),
+/// checkbox beside it — revealed only when JavaScript runs. Tree
+/// members pass their depth, the shade the client paints them with,
+/// and whether the default expansion shows them; loose files sit
+/// outside any tree and carry none of that.
+fn file_row_html(file: &SharedFile, tree_row: Option<(usize, u8, bool)>) -> String {
+    let title = file.name.as_str();
+
+    let attrs = match tree_row {
+        Some((depth, shade, visible)) => format!(
+            " data-depth=\"{depth}\" data-shade=\"{shade}\"{hidden}",
+            hidden = if visible { "" } else { " hidden" },
+        ),
+        None => String::new(),
     };
 
-    let group_attr = group
-        .map(|(_, index)| format!(" data-group-index=\"{index}\""))
-        .unwrap_or_default();
-
     format!(
-        "<li class=\"file-row\" role=\"row\"{group_attr}>\
+        "<li class=\"file-row\" role=\"row\"{attrs}>\
 <button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select {title}\" data-select=\"{id}\" hidden>\
 {unchecked_svg}{checked_svg}\
 </button>\
@@ -599,6 +645,11 @@ const CHECKED_BOX_SVG: &str = "<svg class=\"icon-checked\" xmlns=\"http://www.w3
 /// The project's download icon (desktop `download.svg`), for the
 /// icon-only download button where the app has "Delete selected".
 const DOWNLOAD_ICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2\" /><path d=\"M7 11l5 5l5 -5\" /><path d=\"M12 4l0 12\" /></svg>";
+
+/// The desktop's chevron artwork (`chevron-compact-up.svg`) for the
+/// expand/collapse control: points up when expanded, the client
+/// rotates it when the folder is collapsed.
+const CHEVRON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M4 13l8 -3l8 3\" /></svg>";
 
 #[cfg(test)]
 mod tests {
@@ -789,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_loose_files_come_before_folder_groups() {
+    fn listing_loose_files_come_before_folder_trees() {
         let files = vec![
             member(0, "b.txt", "Photos", "sub/b.txt"),
             shared_file(1, "a.txt", None),
@@ -798,37 +849,103 @@ mod tests {
 
         let html = render_listing(&files, "test-device");
 
-        // Loose files lead, ungrouped; each folder group appears at its
-        // first member's position (first-appearance order).
+        // Loose files lead, ungrouped; the folder tree follows at the
+        // folder root's first member's position (first-appearance order).
         let loose = html.find("href=\"/download/1\"").unwrap();
-        let group = html.find("class=\"group-header\"").unwrap();
-        let member = html.find("sub/b.txt").unwrap();
-        assert!(loose < group, "loose files first");
-        assert!(group < member, "grouped members under their header");
+        let folder = html.find("class=\"folder-row\"").unwrap();
+        let member_row = html.find("href=\"/download/0\"").unwrap();
+        assert!(loose < folder, "loose files first");
+        assert!(folder < member_row, "folder members under their folder row");
     }
 
     #[test]
-    fn listing_escapes_folder_root_names_and_shows_their_members_flush_left() {
+    fn listing_renders_roots_expanded_and_subfolders_collapsed_by_default() {
+        // Photographs holds a direct member and a nested one; the tree
+        // is Photographs (expanded) > beach.jpg + notes (collapsed, its
+        // members rendered but hidden for the enhancement script).
         let files = vec![
-            member(0, "a.txt", "<script>", "vacation/beach.jpg"),
+            shared_file(0, "recipes.txt", None),
+            member(1, "beach.jpg", "Photographs", "beach.jpg"),
+            member(2, "todo.txt", "Photographs", "notes/todo.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        // The root row is an expandable folder row, expanded by default.
+        assert!(html.contains("class=\"folder-row\""));
+        assert!(html.contains("aria-expanded=\"true\""));
+        assert!(html.contains("aria-label=\"Collapse Photographs\""));
+
+        // The `notes` subfolder row itself is visible but collapsed, and
+        // its members are rendered hidden for the enhancement script to
+        // reveal.
+        assert!(html.contains("aria-expanded=\"false\""));
+        assert!(html.contains("aria-label=\"Expand notes\""));
+        let collapsed_member = html
+            .find("<li class=\"file-row\" role=\"row\" data-depth=\"2\" data-shade=\"0\" hidden")
+            .expect("collapsed members render hidden");
+        let notes_row = html
+            .find("<span class=\"folder-name\">notes</span>")
+            .unwrap();
+        assert!(notes_row < collapsed_member);
+
+        // Root content sits at depth 1 under the depth-0 root.
+        assert!(html.contains("data-depth=\"0\""));
+        assert!(html.contains("data-depth=\"1\""));
+    }
+
+    #[test]
+    fn listing_loose_files_carry_no_tree_markup() {
+        let files = vec![shared_file(0, "a.txt", None)];
+
+        let html = render_listing(&files, "test-device");
+
+        let row_start = html.find("<li class=\"file-row\"").unwrap();
+        let row_end = html[row_start..].find("</li>").unwrap() + row_start;
+        let row = &html[row_start..row_end];
+        assert!(!row.contains("data-depth"));
+        assert!(!row.contains("data-shade"));
+        assert!(!row.contains("data-folder-key"));
+    }
+
+    #[test]
+    fn listing_shades_the_expanded_region_and_escapes_folder_names() {
+        let files = vec![
+            member(0, "beach.jpg", "<script>", "beach.jpg"),
             shared_file(1, "b.txt", None),
-            member(2, "b.txt", "<script>", "trip/notes.txt"),
+            member(2, "notes.txt", "<script>", "trip/notes.txt"),
         ];
 
         let html = render_listing(&files, "test-device");
 
         // The display name is the root's own name, escaped like any text.
         assert!(html.contains("&lt;script&gt;"));
-        assert!(!html.contains("<span class=\"group-name\"><script>"));
-        // Both members belong to the same root, so exactly one header
-        // row carries both; member rows are keyed for the group toggle.
-        assert_eq!(
-            html.matches("data-select-group=\"").count(),
-            1,
-            "one header per distinct folder root"
-        );
-        // 1 header + 2 members: members reference their group.
-        assert_eq!(html.matches("data-group-index=\"0\"").count(), 3);
+        assert!(!html.contains("<span class=\"folder-name\"><script>"));
+
+        // Exactly one tree per distinct folder root — the root's own
+        // row is the only one keyed at depth 0 with no subfolder path.
+        assert_eq!(html.matches("data-folder-key=\"f0\"").count(), 1);
+
+        // The expanded root and its visible members carry the shade.
+        let count = html.matches("data-shade=\"1\"").count();
+        assert!(count >= 2, "folder row and its members are shaded: {count}");
+    }
+
+    #[test]
+    fn listing_folder_checkboxes_carry_their_subtree_ids() {
+        // Collapsed subfolder members must appear in the subtree list
+        // too, so selecting a folder acts on members nobody can see.
+        let files = vec![
+            shared_file(0, "recipes.txt", None),
+            member(1, "a.txt", "Photographs", "a.txt"),
+            member(2, "todo.txt", "Photographs", "notes/todo.txt"),
+            member(3, "b.txt", "Other", "b.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        assert!(html.contains("data-subtree=\"1,2\""));
+        assert!(html.contains("data-subtree=\"3\""));
     }
 
     #[test]
