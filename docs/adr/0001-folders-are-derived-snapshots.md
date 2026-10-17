@@ -29,6 +29,8 @@ Adopt the derived model (option 2):
   which is already the app's behaviour for sizes and contents.
 - Empty directories are not represented anywhere; they are invisible in the UIs and
   absent from archives.
+- A dropped path that is itself a symlink is rejected as a failed add, the same rule
+  that skips links encountered inside the walk: links never get followed.
 - Entry paths inside zip archives, folder grouping in both UIs, and "remove a whole
   folder" are all *derived* from the stored relative paths and root names at use time.
 

@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SharerError;
-use crate::file_store::{FileId, FileStore, SharedFile};
+use crate::file_store::{AddFilesOutcome, FileId, FileStore, SharedFile};
 use crate::lan::{LanAddress, SystemLanAddress};
 use crate::server::{AppState, router};
 use crate::{AddFileError, RemoveError};
@@ -24,20 +24,6 @@ pub struct ServerInfo {
     pub url: Option<String>,
     pub port: Option<u16>,
     pub lan_ip: Option<IpAddr>,
-}
-
-/// One path that couldn't be added, and why.
-#[derive(Debug, Serialize)]
-pub struct FailedAdd {
-    pub path: PathBuf,
-    pub error: String,
-}
-
-/// Result of a batch add: what made it in, and what didn't.
-#[derive(Debug, Serialize)]
-pub struct AddFilesOutcome {
-    pub added: Vec<SharedFile>,
-    pub failed: Vec<FailedAdd>,
 }
 
 impl ServerInfo {
@@ -109,24 +95,15 @@ impl Sharer {
             .to_vec()
     }
 
-    /// Register many files at once (the drag-and-drop case). Never fails
-    /// wholesale: each path succeeds or fails independently, so dropping
-    /// a folder among valid files doesn't reject the files.
+    /// Register many paths at once (the drag-and-drop case). Never fails
+    /// wholesale: each path succeeds or fails independently. Directories
+    /// walk into frozen snapshots of their regular files; files add as
+    /// one. The routing lives in the store — this is the lock boundary.
     pub fn add_files(&self, paths: Vec<PathBuf>) -> AddFilesOutcome {
-        let mut outcome = AddFilesOutcome {
-            added: Vec::new(),
-            failed: Vec::new(),
-        };
-        for path in paths {
-            match self.add_file(&path) {
-                Ok(file) => outcome.added.push(file),
-                Err(error) => outcome.failed.push(FailedAdd {
-                    path,
-                    error: error.to_string(),
-                }),
-            }
-        }
-        outcome
+        self.store
+            .lock()
+            .expect("file store not poisoned")
+            .add_paths(paths)
     }
 
     // -- lifecycle ------------------------------------------------------

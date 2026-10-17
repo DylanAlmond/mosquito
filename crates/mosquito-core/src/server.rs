@@ -300,6 +300,7 @@ mod tests {
             name: "<script>.txt".into(),
             path: "unused".into(),
             size: 42,
+            provenance: None,
         }];
 
         let html = render_listing(&files, "test-device");

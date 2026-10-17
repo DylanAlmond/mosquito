@@ -191,19 +191,77 @@ async fn stop_releases_the_port() {
 fn add_files_splits_successes_and_failures() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("good.txt"), b"x").unwrap();
+    std::fs::create_dir(dir.path().join("emptydir")).unwrap();
 
     let sharer = sharer_on("192.0.2.7");
     let outcome = sharer.add_files(vec![
         dir.path().join("good.txt"),
         dir.path().join("missing.txt"),
-        dir.path().to_path_buf(), // the directory itself
+        // An empty directory contributes neither files nor failures.
+        dir.path().join("emptydir"),
     ]);
 
     assert_eq!(outcome.added.len(), 1);
     assert_eq!(outcome.added[0].name, "good.txt");
-    assert_eq!(outcome.failed.len(), 2);
+    assert_eq!(outcome.failed.len(), 1);
     assert!(outcome.failed[0].error.contains("does not exist"));
-    assert!(outcome.failed[1].error.contains("directories"));
+}
+
+#[test]
+fn add_files_walks_directories_into_their_files() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("folder");
+    std::fs::create_dir_all(folder.join("sub")).unwrap();
+    std::fs::write(folder.join("a.txt"), b"a").unwrap();
+    std::fs::write(folder.join("sub").join("b.txt"), b"b").unwrap();
+    let loose = dir.path().join("loose.txt");
+    std::fs::write(&loose, b"l").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let outcome = sharer.add_files(vec![folder.clone(), loose.clone()]);
+
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+
+    // Loose files keep their old shape: no folder provenance.
+    let loose_file = outcome
+        .added
+        .iter()
+        .find(|f| f.name == "loose.txt")
+        .unwrap();
+    assert!(loose_file.provenance.is_none());
+
+    // Folder members carry both parts of their provenance.
+    let a = outcome.added.iter().find(|f| f.name == "a.txt").unwrap();
+    let a_provenance = a.provenance.as_ref().unwrap();
+    assert_eq!(a_provenance.relative_path, "a.txt");
+    assert_eq!(a_provenance.folder_root, folder);
+
+    let b = outcome.added.iter().find(|f| f.name == "b.txt").unwrap();
+    let b_provenance = b.provenance.as_ref().unwrap();
+    assert_eq!(b_provenance.relative_path, "sub/b.txt");
+    assert_eq!(b_provenance.folder_root, folder);
+}
+
+#[test]
+fn add_files_allows_the_same_folder_twice() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("a.txt"), b"a").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let first = sharer.add_files(vec![folder.clone()]);
+    let second = sharer.add_files(vec![folder]);
+
+    assert_eq!(first.added.len(), 1);
+    assert_eq!(second.added.len(), 1);
+
+    // Same path can be shared twice, as for loose files: distinct ids,
+    // identical provenance — resolving that collision is a job for
+    // consumers (e.g. zip writing), not the store.
+    assert_ne!(first.added[0].id, second.added[0].id);
+    assert_eq!(first.added[0].provenance, second.added[0].provenance);
+    assert_eq!(sharer.files().len(), 2);
 }
 
 #[test]
