@@ -1,13 +1,15 @@
-# Desktop UI harness sweep (issue #7): one pass over the real dev build
-# against the fixtures seeded via `tauri-pilot ipc harness_seed`
-# (deterministic temp tree: two loose files + the `Photographs` folder
-# with two members) — see `harness/desktop/run.mjs`.
+# Desktop UI harness sweep (issues #7 and #8): one pass over the real
+# dev build against the fixtures seeded via `tauri-pilot ipc
+# harness_seed` (deterministic temp tree: two loose files + the
+# `Photographs` folder with a direct member and a nested one) — see
+# `harness/desktop/run.mjs`.
 #
-# Drives folder groups, selection, and bulk removal. Targets are CSS
-# attribute selectors, not snapshot refs: refs reset on every snapshot
-# and scenarios have no snapshot step. Screenshots land in
-# `test-results/desktop-harness/`; failure shots go to the
-# `--screenshots-dir` the driver passes.
+# Drives the folder tree (expand/collapse via chevrons, default states,
+# subtree selection reaching folded members), selection, and bulk
+# removal. Targets are CSS attribute selectors, not snapshot refs: refs
+# reset on every snapshot and scenarios have no snapshot step.
+# Screenshots land in `test-results/desktop-harness/`; failure shots go
+# to the `--screenshots-dir` the driver passes.
 
 [[step]]
 name = "the shared-files panel appears once the fixture seed drained"
@@ -38,10 +40,14 @@ selector = ".file-rows"
 stable = 250
 
 [[step]]
-name = "the Photographs folder group renders its header"
-action = "assert-text"
-target = ".group-name"
-expected = "Photographs"
+name = "the Photographs folder row is expandable and starts expanded"
+action = "assert-exists"
+target = '[aria-label="Collapse Photographs"]'
+
+[[step]]
+name = "the nested travel subfolder starts collapsed"
+action = "assert-exists"
+target = '[aria-label="Expand travel"]'
 
 [[step]]
 name = "loose files got their row checkboxes"
@@ -49,42 +55,84 @@ action = "assert-exists"
 target = '[aria-label="Select beach-notes.txt"]'
 
 [[step]]
-name = "group members keep their relative paths"
+name = "the second loose file is listed"
+action = "assert-exists"
+target = '[aria-label="Select release-plan.md"]'
+
+[[step]]
+name = "the direct folder member keeps its row"
 action = "assert-exists"
 target = '[aria-label="Select sunrise.jpg"]'
 
 [[step]]
-name = "nested members count through their relative path"
-action = "assert-exists"
-target = '[aria-label="Select travel/beach.jpg"]'
+name = "two loose files plus the direct member are listed — the nested member stays folded"
+action = "assert-count"
+selector = ".file-row"
+expected = 3
 
 [[step]]
-name = "two loose files plus the two folder members are listed"
+name = "expand the nested subfolder"
+action = "click"
+target = '[aria-label="Expand travel"]'
+
+[[step]]
+name = "the nested member appears under its subfolder"
 action = "assert-count"
 selector = ".file-row"
 expected = 4
 
 [[step]]
-name = "toggling the group selects both members"
+name = "the folded member joins the list"
+action = "assert-exists"
+target = '[aria-label="Select beach.jpg"]'
+
+[[step]]
+name = "capture the expanded tree"
+action = "screenshot"
+path = "test-results/desktop-harness/folder-tree.png"
+selector = ".file-table"
+
+[[step]]
+name = "fold the nested subfolder back"
+action = "click"
+target = '[aria-label="Collapse travel"]'
+
+[[step]]
+name = "the collapsed content is gone while the tree keeps its shape"
+action = "assert-count"
+selector = ".file-row"
+expected = 3
+
+[[step]]
+name = "toggling the folder selects its whole subtree"
 action = "click"
 target = '[aria-label="Select or deselect all files in Photographs"]'
 
 [[step]]
-name = "exactly the group members highlight"
-action = "assert-count"
-selector = ".file-row.is-selected"
-expected = 2
-
-[[step]]
-name = "the label flip confirms the members are selected"
+name = "the visible member highlights"
 action = "assert-exists"
 target = '[aria-label="Deselect sunrise.jpg"]'
 
 [[step]]
-name = "capture the group-selection state"
+name = "deselect the visible member"
+action = "click"
+target = '[aria-label="Deselect sunrise.jpg"]'
+
+[[step]]
+name = "the folded member still counts: the folder reads partial select"
+action = "assert-exists"
+target = '[aria-label="Select or deselect all files in Photographs"][aria-checked="mixed"]'
+
+[[step]]
+name = "capture the subtree-selection state"
 action = "screenshot"
-path = "test-results/desktop-harness/group-selection.png"
+path = "test-results/desktop-harness/subtree-selection.png"
 selector = ".file-table"
+
+[[step]]
+name = "reselect the whole subtree"
+action = "click"
+target = '[aria-label="Select or deselect all files in Photographs"]'
 
 [[step]]
 name = "select all shared files"
@@ -92,10 +140,10 @@ action = "click"
 target = '[aria-label="Select all shared files"]'
 
 [[step]]
-name = "everything highlights"
+name = "the visible rows highlight (the folded member is selected too)"
 action = "assert-count"
 selector = ".file-row.is-selected"
-expected = 4
+expected = 3
 
 [[step]]
 name = "capture the select-all state"

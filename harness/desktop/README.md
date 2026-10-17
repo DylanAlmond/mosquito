@@ -25,9 +25,9 @@ Fixture tree (recreated per run, `$TEMP\mosquito-harness\desktop`):
 ```text
 beach-notes.txt     loose
 release-plan.md     loose
-Photographs/        folder root → group "Photographs"
-  sunrise.jpg       member
-  travel/beach.jpg  member (relative path "travel/beach.jpg")
+Photographs/        folder root → tree "Photographs" (starts expanded)
+  sunrise.jpg       member (direct)
+  travel/beach.jpg  nested member, hidden until `travel` expands
 ```
 
 Screenshots land in gitignored `test-results/desktop-harness/`.
@@ -50,7 +50,7 @@ tauri-pilot ipc harness_seed        # stage the fixture tree through the
                                     # starts the server like a drop
 tauri-pilot snapshot -i             # refs (@e1, @e2…) — refs reset per snapshot
 tauri-pilot click @e12              # toggle the files list, select a row…
-tauri-pilot assert text .group-name "Photographs"
+tauri-pilot assert text .folder-name "Photographs"
 tauri-pilot assert count .file-row 4
 tauri-pilot screenshot /tmp/desktop-now.png
 tauri-pilot logs --level error      # console errors + unhandled rejections
@@ -62,11 +62,18 @@ the useful stable handles on the list are:
 | Selector | Meaning |
 | --- | --- |
 | `.file-table` | the whole shared-files table |
-| `.file-row` / `.file-row.is-selected` | rows, highlighted rows |
-| `.group-name` | a folder group's display name |
+| `.file-row` / `.file-row.is-selected` | file rows, highlighted rows |
+| `.folder-row` | an expandable folder row (root or subfolder) |
+| `.folder-name` | a folder row's display name |
+| `[aria-label="Collapse <name>"]` / `[aria-label="Expand <name>"]` | the chevron only — the folder row itself is never a toggle |
+| `[aria-label="…"][aria-expanded="true"]` | a folder's expansion state |
+| `[aria-label="Select or deselect all files in <name>"]` | folder subtree checkbox (acts on folded members too) |
 | `[aria-label="Select all shared files"]` | select-all header checkbox |
-| `[aria-label="Select or deselect all files in <name>"]` | group checkbox |
 | `[aria-label="Delete selected files"]` | bulk-removal action |
+
+The folder-tree selectors are the stable test contract for this UI
+(issue #8): scenarios target attributes, never layout or snapshot
+refs, so the DOM can change without harness breakage.
 
 Run the scenario again while the window is open:
 
@@ -80,9 +87,10 @@ tauri-pilot run harness/desktop/scenarios/desktop-sweep.toml --screenshots-dir t
 the fixture files and queues their paths in the production
 `PendingShareFiles` buffer, then emits `share-files-requested` — the
 frontend drains it through the same `add_paths` flow as a real
-drop/pick, including server start. Scenario coverage: folder groups,
-selection (row + group + select-all), bulk removal, and the return to
-the empty dropzone.
+drop/pick, including server start. Scenario coverage: the folder tree
+(expansion defaults, chevron toggling, subtree selection counting
+folded members), selection (row + folder + select-all), bulk removal,
+and the return to the empty dropzone.
 
 ## Release safety
 
