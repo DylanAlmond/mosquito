@@ -70,6 +70,9 @@ the useful stable handles on the list are:
 | `[aria-label="Select or deselect all files in <name>"]` | folder subtree checkbox (acts on folded members too) |
 | `[aria-label="Select all shared files"]` | select-all header checkbox |
 | `[aria-label="Delete selected files"]` | bulk-removal action |
+| `.drop-title` | the idle dropzone's instruction text "Drop files or folders here" |
+| `[aria-label="Choose file"]` / `[aria-label="Choose folder"]` | the two _Choose File_ / _Choose Folder_ affordances beneath the dropzone and the active card |
+| `.dropzone` / `.dropzone--active` | the idle pick surface (opens the file dialog) and the sharing-details card |
 
 The folder-tree selectors are the stable test contract for this UI
 (issue #8): scenarios target attributes, never layout or snapshot

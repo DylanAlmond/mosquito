@@ -227,7 +227,7 @@ async function copyUrl() {
   cursor: pointer;
 }
 
-.choose-folder:disabled {
+.choose-button:disabled {
   cursor: default;
   opacity: 0.45;
 }

@@ -187,7 +187,7 @@ timeout_ms = 30000
 name = "the dropzone is back"
 action = "assert-text"
 target = ".drop-title"
-expected = "Click or Drop files or folders here"
+expected = "Drop files or folders here"
 
 [[step]]
 name = "final state"
