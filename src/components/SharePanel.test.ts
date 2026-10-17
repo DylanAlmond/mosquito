@@ -50,7 +50,7 @@ describe('SharePanel folder picking', () => {
     vi.mocked(open).mockResolvedValue(['C:/Users/me/Photos']);
     const wrapper = mount(SharePanel);
 
-    await wrapper.find('.choose-folder').trigger('click');
+    await wrapper.find('[aria-label="Choose folder"]').trigger('click');
 
     expect(open).toHaveBeenCalledWith(
       expect.objectContaining({ directory: true, multiple: true })
@@ -84,7 +84,7 @@ describe('SharePanel folder picking', () => {
     expect(open).toHaveBeenCalledWith(expect.objectContaining({ directory: false }));
 
     // Folder button click while running still only opens the directory dialog.
-    await wrapper.find('.choose-folder').trigger('click');
+    await wrapper.find('[aria-label="Choose folder"]').trigger('click');
     expect(open).toHaveBeenCalledTimes(2);
     expect(open).toHaveBeenLastCalledWith(expect.objectContaining({ directory: true }));
   });

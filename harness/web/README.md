@@ -13,13 +13,15 @@ harness_server`, loopback only) and runs `harness/web/listing.spec.ts`:
 | Test | Server | Asserts |
 | --- | --- | --- |
 | empty listing state | `127.0.0.1:8474` | empty-state text, no rows, no select-all |
-| loose files first | `127.0.0.1:8473` | loose rows before any group, JS-driven checkboxes |
-| folder groups | `127.0.0.1:8473` | `Photographs` header, member rows by relative path |
-| selection | `127.0.0.1:8473` | select-all → all highlighted + zip link; ungroup → mixed state |
+| loose files first | `127.0.0.1:8473` | loose rows before any folder, JS-driven checkboxes |
+| folder tree | `127.0.0.1:8473` | `Photographs` root expanded at depth 0, `notes` subfolder collapsed with its member hidden, depth-shading and depth attributes |
+| chevron toggles | `127.0.0.1:8473` | chevron-only expand/collapse, region re-shading, row/name clicks are no-ops |
+| subtree selection | `127.0.0.1:8473` | select-all → all highlighted + zip link; folder selection counts folded members → mixed on partial; batch-download link includes hidden ids |
 
 Screenshots land in a deterministic, gitignored directory —
 `test-artifacts/web-harness/` (`empty-list`, `loose-files`,
-`folder-groups`, `selections` — same names every run).
+`folder-groups`, `folder-toggles`, `selections` — same names every
+run).
 
 ## Servers by hand
 
@@ -50,6 +52,8 @@ yarn playwright test --config harness/web/playwright.config.ts
 
 ## What the fixture data looks like
 
-`recipes.txt` + `checklist.txt` loose, then the folder group
-`Photographs` with `beach.jpg` and `notes/todo.txt` beneath it — four
-rows, ids 0–3, matching the zip-link ids asserted in the selection test.
+`recipes.txt` + `checklist.txt` loose, then the folder tree
+`Photographs` (expanded by default) with `beach.jpg` directly inside
+and the `notes` subfolder (collapsed by default) holding `todo.txt` —
+four files, ids 0–3, matching the zip-link ids asserted in the
+selection test.

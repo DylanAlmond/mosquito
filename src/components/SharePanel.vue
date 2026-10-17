@@ -65,18 +65,32 @@ async function copyUrl() {
       :aria-busy="busy || selecting"
       @click="chooseFiles"
     >
-      <span class="drop-title">Click or Drop files or folders here</span>
+      <span class="drop-title">Drop files or folders here</span>
     </button>
 
-    <button
-      class="choose-folder"
-      type="button"
-      aria-label="Choose folder"
-      :disabled="busy || selecting"
-      @click="chooseFolder"
-    >
-      Choose Folder
-    </button>
+    <section class="choose-section">
+      <button
+        class="choose-button"
+        type="button"
+        aria-label="Choose file"
+        :disabled="busy || selecting"
+        @click="chooseFiles"
+      >
+        Choose File
+      </button>
+
+      <span>or</span>
+
+      <button
+        class="choose-button"
+        type="button"
+        aria-label="Choose folder"
+        :disabled="busy || selecting"
+        @click="chooseFolder"
+      >
+        Choose Folder
+      </button>
+    </section>
   </template>
 
   <template v-else>
@@ -110,15 +124,29 @@ async function copyUrl() {
       </button>
     </section>
 
-    <button
-      class="choose-folder"
-      type="button"
-      aria-label="Choose folder"
-      :disabled="busy || selecting"
-      @click="chooseFolder"
-    >
-      Choose Folder
-    </button>
+    <section class="choose-section">
+      <button
+        class="choose-button"
+        type="button"
+        aria-label="Choose file"
+        :disabled="busy || selecting"
+        @click="chooseFiles"
+      >
+        Choose File
+      </button>
+
+      <span>or</span>
+
+      <button
+        class="choose-button"
+        type="button"
+        aria-label="Choose folder"
+        :disabled="busy || selecting"
+        @click="chooseFolder"
+      >
+        Choose Folder
+      </button>
+    </section>
 
     <Transition name="files">
       <div v-if="filesExpanded && files.length" class="file-list-transition">
@@ -155,12 +183,6 @@ async function copyUrl() {
   background: var(--surface);
   transition: background-color 160ms ease;
 
-  margin-bottom: 1.25rem;
-
-  &.dropzone--active {
-    margin-bottom: 0;
-  }
-
   &:not(:disabled) {
     cursor: pointer;
   }
@@ -182,22 +204,30 @@ async function copyUrl() {
   text-align: center;
 }
 
-.choose-folder {
+.choose-section {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 1rem;
   width: 100%;
+  margin: 1rem 0;
+  color: var(--ink);
+  font-size: 0.9375rem;
+}
+
+.choose-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
   height: 2.25rem;
   padding: 0;
   border: 0;
-  background: none;
-  color: var(--ink);
-  font-size: 0.9375rem;
   text-decoration: underline;
   cursor: pointer;
 }
 
-.choose-folder:disabled {
+.choose-button:disabled {
   cursor: default;
   opacity: 0.45;
 }
@@ -249,7 +279,6 @@ async function copyUrl() {
   min-width: 0;
   display: grid;
   grid-template-rows: 1fr;
-  margin-top: 16px;
 }
 
 .files-enter-active,

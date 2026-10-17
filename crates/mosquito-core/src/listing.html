@@ -30,6 +30,9 @@
         --surface: #fff;
         --muted: #777;
         --radius: 0.5rem;
+        /* Folder-tree shading token, mirroring the desktop app's
+           stylesheet token (light scheme only, per ADR-0002). */
+        --folder-shade: #f1f1f1;
       }
       * {
         box-sizing: border-box;
@@ -221,24 +224,42 @@
         flex: 0 0 auto;
         font-size: 0.75rem;
       }
-      /* Slim group header rows, background-tinted like the app. */
-      .group-header {
+      /* Expandable folder rows (ADR-0002): no indentation — the
+         hierarchy is communicated by the alternating shade instead.
+         The row itself is never a toggle: only its chevron is. */
+      .folder-row {
         display: grid;
-        grid-template-columns: 32px minmax(0, 1fr);
+        grid-template-columns: 32px 32px minmax(0, 1fr);
         align-items: center;
         column-gap: 4px;
         min-height: 38px;
         padding: 0 0.875rem;
-        background: #f1f1f1;
         font-size: 0.875rem;
         font-weight: 600;
         line-height: 1;
       }
-      .group-name {
+      [data-shade="1"] {
+        background: var(--folder-shade);
+      }
+      .folder-name {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .folder-chevron svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
+        transition: transform 140ms ease;
+      }
+      .folder-chevron.is-collapsed svg {
+        transform: rotate(180deg);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .folder-chevron svg {
+          transition: none;
+        }
       }
       .empty-state {
         margin: 0;
@@ -285,10 +306,17 @@
     <script>
       // Progressive enhancement only: with JavaScript off, the
       // checkboxes never appear and the per-file links stay the only
-      // (and fully working) way to download.
+      // (and fully working) way to download; folders render in their
+      // default expansion (top level open, subfolders closed).
       (function () {
         var checkboxes = Array.prototype.slice.call(
           document.querySelectorAll('[data-select]')
+        );
+        var folderButtons = Array.prototype.slice.call(
+          document.querySelectorAll('[data-subtree]')
+        );
+        var chevrons = Array.prototype.slice.call(
+          document.querySelectorAll('[data-toggle]')
         );
         var selectAll = document.getElementById('select-all');
         var downloadButton = document.getElementById('download-selected');
@@ -304,24 +332,19 @@
           return ids;
         }
 
-        function membersOf(groupIndex) {
-          return checkboxes.filter(function (checkbox) {
-            var li = checkbox.closest('.file-row');
-            return li && li.dataset.groupIndex === groupIndex;
-          });
+        // Folder checkboxes act on the whole subtree — the server lists
+        // every member id (collapsed ones included) in `data-subtree`,
+        // so what is folded away never changes the outcome.
+        function subtreeIds(button) {
+          return button.dataset.subtree.split(',');
         }
 
-        // Is every member of the group behind this checkbox selected?
-        function isGroupComplete(group) {
-          return membersOf(group.dataset.selectGroup).every(function (box) {
-            return selected[box.dataset.select] === true;
+        function subtreeCount(button) {
+          var count = 0;
+          subtreeIds(button).forEach(function (id) {
+            if (selected[id] === true) count += 1;
           });
-        }
-
-        function selectedInGroup(group) {
-          return membersOf(group.dataset.selectGroup).filter(function (box) {
-            return selected[box.dataset.select] === true;
-          }).length;
+          return count;
         }
 
         function setBox(on, checkbox) {
@@ -334,19 +357,90 @@
           if (li) li.classList.toggle('is-selected', on);
         }
 
+        // Expansion state keyed by folder key (root index + subfolder
+        // path); the server renders the default and each chevron
+        // carries it as aria-expanded. Like the desktop, none of this
+        // survives a page reload — the default state is always the
+        // starting point.
+        var expanded = {};
+        chevrons.forEach(function (chevron) {
+          expanded[chevron.dataset.toggle] =
+            chevron.getAttribute('aria-expanded') === 'true';
+        });
+
+        // Expand/collapse is chevron-only: a folder row's click never
+        // toggles it. Rows are flat in the DOM in tree order, so one
+        // depth-driven scan decides visibility and shading for
+        // everything — matching the desktop's derivation: a region is
+        // grey when the folder showing it sits at even depth, and a
+        // collapsed folder row falls back to its parent's shade.
+        function applyExpansion() {
+          var stack = [];
+          Array.prototype.forEach.call(
+            document.querySelectorAll('.file-list > li'),
+            function (row) {
+              var isFolder = row.classList.contains('folder-row');
+              if (!isFolder && row.dataset.depth === undefined) {
+                // Loose files sit outside every tree.
+                row.hidden = false;
+                return;
+              }
+
+              var depth = Number(row.dataset.depth);
+              while (stack.length && stack[stack.length - 1].depth >= depth) {
+                stack.pop();
+              }
+              var parent = stack[stack.length - 1];
+
+              if (isFolder) {
+                var key = row.dataset.folderKey;
+                var open = expanded[key];
+                // Even depth regions are grey, odd ones fall back — and
+                // a collapsed folder row keeps its parent's shade.
+                var shade = open ? (depth % 2 === 0 ? 1 : 0) : parent ? parent.shade : 0;
+                row.hidden = !!parent && !openStack(stack);
+                row.dataset.shade = String(shade);
+                stack.push({ depth: depth, open: open, shade: shade });
+
+                var chevron = row.querySelector('[data-toggle]');
+                if (chevron) {
+                  chevron.setAttribute('aria-expanded', open ? 'true' : 'false');
+                  chevron.setAttribute(
+                    'aria-label',
+                    (open ? 'Collapse ' : 'Expand ') +
+                      row.querySelector('.folder-name').textContent
+                  );
+                  chevron.classList.toggle('is-collapsed', !open);
+                }
+              } else {
+                row.hidden = !openStack(stack);
+                row.dataset.shade = String(parent ? parent.shade : 0);
+              }
+            }
+          );
+        }
+
+        // Every folder in scope is open.
+        function openStack(stack) {
+          for (var i = 0; i < stack.length; i += 1) {
+            if (!stack[i].open) return false;
+          }
+          return true;
+        }
+
         function refresh() {
           checkboxes.forEach(function (checkbox) {
             setBox(selected[checkbox.dataset.select] === true, checkbox);
           });
 
-          document.querySelectorAll('[data-select-group]').forEach(function (group) {
-            var count = selectedInGroup(group);
-            var members = membersOf(group.dataset.selectGroup);
+          folderButtons.forEach(function (button) {
+            var ids = subtreeIds(button);
+            var count = subtreeCount(button);
             // Desktop mirrors aria-checked="mixed" for partially
-            // selected groups while still showing the unchecked icon.
-            setBox(count === members.length, group);
-            if (count > 0 && count < members.length) {
-              group.setAttribute('aria-checked', 'mixed');
+            // selected subtrees while still showing the unchecked icon.
+            setBox(count === ids.length && ids.length > 0, button);
+            if (count > 0 && count < ids.length) {
+              button.setAttribute('aria-checked', 'mixed');
             }
           });
 
@@ -391,17 +485,27 @@
           refresh();
         });
 
-        document.querySelectorAll('[data-select-group]').forEach(function (group) {
-          group.hidden = false;
-          group.addEventListener('click', function () {
-            var every = isGroupComplete(group);
-            membersOf(group.dataset.selectGroup).forEach(function (box) {
-              selected[box.dataset.select] = !every;
+        folderButtons.forEach(function (button) {
+          button.hidden = false;
+          button.addEventListener('click', function () {
+            var every = subtreeCount(button) === subtreeIds(button).length;
+            subtreeIds(button).forEach(function (id) {
+              selected[id] = !every;
             });
             refresh();
           });
         });
 
+        chevrons.forEach(function (chevron) {
+          chevron.hidden = false;
+          chevron.addEventListener('click', function () {
+            var key = chevron.dataset.toggle;
+            expanded[key] = !expanded[key];
+            applyExpansion();
+          });
+        });
+
+        applyExpansion();
         refresh();
       })();
     </script>

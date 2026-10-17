@@ -26,6 +26,10 @@ A path the user tried to share that could not be added (unreadable, special file
 
 A directory the user chose to add. A folder root is not itself a shareable entity: the files found beneath it are added as individual **shared files**. Folder roots are remembered so their members can be grouped, selected, and downloaded together. Two folder roots with the same name may coexist independently.
 
+## Folder tree
+
+The derived structure the UIs and zip layout present: the **folder roots** as top-level folders, and beneath each, into arbitrarily deep nesting, the files and **subfolders** implied by members' **relative paths**. Derived at render time and never stored; a folder in the tree is never itself shareable or mutable — only its contents are.
+
 ## Frozen snapshot
 
 The membership model for folder adds: which files belong to a folder root is decided once, at add time, by walking the tree then. Files inside keep being streamed from disk live, so content changes on disk are visible, but membership and membership-derived structure (grouping, zip layout) are not re-scanned. Consistent with how file sizes are captured at add time while contents stream live.
@@ -41,3 +45,7 @@ A member file's path below its folder root (e.g. `vacation/beach.jpg` under root
 ## Shared file (SharedFile)
 
 A single regular file registered with the sharer: an immutable **file id**, a display **name**, an absolute on-disk **path**, and a **size** captured at add time. The only shared entity; there is no "folder" entity in the store.
+
+## Subfolder
+
+A folder nested below a **folder root** in the **folder tree**, named by a segment of its members' **relative paths** (e.g. `vacation` under root `Photos`, containing `beach.jpg`). A subfolder is a part of the derived tree, not an entity: it cannot be renamed, moved, removed, or shared — only its contents, through the shared files it derives from.
