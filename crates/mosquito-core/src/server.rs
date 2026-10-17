@@ -509,10 +509,9 @@ fn render_listing(files: &[SharedFile], device_name: &str) -> String {
                     }
                 };
 
-                groups[index].html.push_str(&file_row_html(
-                    file,
-                    Some((provenance, index)),
-                ));
+                groups[index]
+                    .html
+                    .push_str(&file_row_html(file, Some((provenance, index))));
             }
         }
     }

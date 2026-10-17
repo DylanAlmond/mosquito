@@ -1,0 +1,127 @@
+# Desktop UI harness sweep (issue #7): one pass over the real dev build
+# against the fixtures seeded via `tauri-pilot ipc harness_seed`
+# (deterministic temp tree: two loose files + the `Photographs` folder
+# with two members) — see `harness/desktop/run.mjs`.
+#
+# Drives folder groups, selection, and bulk removal. Targets are CSS
+# attribute selectors, not snapshot refs: refs reset on every snapshot
+# and scenarios have no snapshot step. Screenshots land in
+# `test-results/desktop-harness/`; failure shots go to the
+# `--screenshots-dir` the driver passes.
+
+[[step]]
+name = "the shared-files panel appears once the fixture seed drained"
+action = "wait"
+selector = '[aria-label="Show shared files"]'
+timeout_ms = 120000
+
+[[step]]
+name = "record the initial sharing panel"
+action = "screenshot"
+path = "test-results/desktop-harness/desktop-start.png"
+
+[[step]]
+name = "expand the files list"
+action = "click"
+target = '[aria-label="Show shared files"]'
+
+[[step]]
+name = "the file table renders"
+action = "wait"
+selector = ".file-table"
+timeout_ms = 30000
+
+[[step]]
+name = "settle the list layout"
+action = "watch"
+selector = ".file-rows"
+stable = 250
+
+[[step]]
+name = "the Photographs folder group renders its header"
+action = "assert-text"
+target = ".group-name"
+expected = "Photographs"
+
+[[step]]
+name = "loose files got their row checkboxes"
+action = "assert-exists"
+target = '[aria-label="Select beach-notes.txt"]'
+
+[[step]]
+name = "group members keep their relative paths"
+action = "assert-exists"
+target = '[aria-label="Select sunrise.jpg"]'
+
+[[step]]
+name = "nested members count through their relative path"
+action = "assert-exists"
+target = '[aria-label="Select travel/beach.jpg"]'
+
+[[step]]
+name = "two loose files plus the two folder members are listed"
+action = "assert-count"
+selector = ".file-row"
+expected = 4
+
+[[step]]
+name = "toggling the group selects both members"
+action = "click"
+target = '[aria-label="Select or deselect all files in Photographs"]'
+
+[[step]]
+name = "exactly the group members highlight"
+action = "assert-count"
+selector = ".file-row.is-selected"
+expected = 2
+
+[[step]]
+name = "the label flip confirms the members are selected"
+action = "assert-exists"
+target = '[aria-label="Deselect sunrise.jpg"]'
+
+[[step]]
+name = "capture the group-selection state"
+action = "screenshot"
+path = "test-results/desktop-harness/group-selection.png"
+selector = ".file-table"
+
+[[step]]
+name = "select all shared files"
+action = "click"
+target = '[aria-label="Select all shared files"]'
+
+[[step]]
+name = "everything highlights"
+action = "assert-count"
+selector = ".file-row.is-selected"
+expected = 4
+
+[[step]]
+name = "capture the select-all state"
+action = "screenshot"
+path = "test-results/desktop-harness/selections.png"
+selector = ".file-table"
+
+[[step]]
+name = "bulk-remove the selection"
+action = "click"
+target = '[aria-label="Delete selected files"]'
+
+[[step]]
+name = "the empty list unmounts once nothing is shared"
+action = "wait"
+selector = ".file-table"
+gone = true
+timeout_ms = 30000
+
+[[step]]
+name = "the dropzone is back"
+action = "assert-text"
+target = ".drop-title"
+expected = "Click or Drop files or folders here"
+
+[[step]]
+name = "final state"
+action = "screenshot"
+path = "test-results/desktop-harness/after-bulk-removal.png"

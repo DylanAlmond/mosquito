@@ -5,6 +5,8 @@ import svgLoader from 'vite-svg-loader';
 export default defineConfig({
   plugins: [vue(), svgLoader()],
   test: {
-    environment: 'happy-dom'
+    environment: 'happy-dom',
+    // Playwright owns the .spec.ts files under harness/web.
+    exclude: ['node_modules/**', 'harness/**']
   }
 });

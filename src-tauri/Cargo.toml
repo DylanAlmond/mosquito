@@ -24,6 +24,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 mosquito-core = { path = "../crates/mosquito-core" }
 tauri-plugin-dialog = "2.7.3"
+# Agent UI visibility (issue #7): the tauri-pilot plugin and its CLI talk
+# over a local Named Pipe / socket. It compiles in both builds, but the
+# socket server only starts in debug (registration in `lib.rs` is gated
+# on `debug_assertions`), so release builds are never reachable by it.
+tauri-plugin-pilot = { version = "0.8.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

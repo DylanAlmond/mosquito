@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(debug_assertions)]
+mod harness;
 #[cfg(all(windows, not(debug_assertions)))]
 mod shell;
 
@@ -53,24 +55,49 @@ pub fn run() {
         }
     }));
 
-    builder
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Sharer::new())
         .manage(PendingShareFiles::new(share_paths(
             std::env::args().skip(1),
-        )))
-        .invoke_handler(tauri::generate_handler![
-            list_files,
-            add_files,
-            remove_file,
-            start_server,
-            stop_server,
-            get_server_info,
-            get_qr,
-            take_pending_share_paths,
-            register_context_menu
-        ])
+        )));
+
+    // The tauri-pilot socket server lives behind debug_assertions so a
+    // release binary can never be driven from outside; see `harness`.
+    // Its handler table carries the debug-only fixture commands, so the
+    // two invoke_handler registrations must list the same prod commands.
+    #[cfg(debug_assertions)]
+    let builder =
+        builder
+            .plugin(tauri_plugin_pilot::init())
+            .invoke_handler(tauri::generate_handler![
+                list_files,
+                add_files,
+                remove_file,
+                start_server,
+                stop_server,
+                get_server_info,
+                get_qr,
+                take_pending_share_paths,
+                register_context_menu,
+                harness::harness_seed
+            ]);
+
+    #[cfg(not(debug_assertions))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        list_files,
+        add_files,
+        remove_file,
+        start_server,
+        stop_server,
+        get_server_info,
+        get_qr,
+        take_pending_share_paths,
+        register_context_menu
+    ]);
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
