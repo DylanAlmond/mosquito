@@ -37,7 +37,8 @@ Screenshots land in gitignored `test-results/desktop-harness/`.
 Run in terminal 1 (keep open):
 
 ```sh
-yarn tauri dev      # debug build; registers tauri-plugin-pilot
+yarn tauri dev --features pilot
+    # debug build; registers tauri-plugin-pilot (opt-in, see below)
 ```
 
 Then inspect / drive the window from terminal 2:
@@ -97,10 +98,20 @@ select-all), bulk removal, and the return to the empty dropzone.
 
 ## Release safety
 
-`tauri_plugin_pilot::init()` and the whole `harness` module sit behind
-`#[cfg(debug_assertions)]` (`src-tauri/src/lib.rs`): the crate compiles,
-but the socket server and the command never register in release, so a
-released binary cannot be driven from outside.
+The `tauri-plugin-pilot` dependency itself never links into release: it
+is an optional dependency behind the `pilot` feature (`src-tauri/
+Cargo.toml`), and `pilot` is deliberately not in `default` — Cargo has
+no profile-gated dependencies, so default-features resolution is what
+keeps release builds (CI `tauri-action`, plain `cargo build --release`)
+pilot-free. `tauri_plugin_pilot::init()` and the whole `harness` module
+sit behind `#[cfg(all(debug_assertions, feature = "pilot"))]`
+(`src-tauri/src/lib.rs`), with a `compile_error!` guard that fails any
+release build that enables the feature anyway. The `pilot:default`
+capability lives in `capabilities/pilot.toml` — TOML because that's
+where its comment lives — declaring a grant that is inert in release:
+nothing the permission allows is reachable when the plugin never
+registers (and `build.rs` only feeds the file to tauri-build when the
+feature is on).
 
 ## Troubleshooting
 

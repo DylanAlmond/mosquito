@@ -35,7 +35,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 function launchApp() {
   // Command as one string: shell:true + args triggers Node's DEP0190
   // warning, and on Windows `yarn` is a .cmd only reachable via shell.
-  const child = spawn('yarn tauri dev', {
+  const child = spawn('yarn tauri dev --features pilot', {
     cwd: ROOT,
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],

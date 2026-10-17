@@ -1,5 +1,5 @@
 mod commands;
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "pilot"))]
 mod harness;
 #[cfg(all(windows, not(debug_assertions)))]
 mod shell;
@@ -63,11 +63,17 @@ pub fn run() {
             std::env::args().skip(1),
         )));
 
-    // The tauri-pilot socket server lives behind debug_assertions so a
-    // release binary can never be driven from outside; see `harness`.
-    // Its handler table carries the debug-only fixture commands, so the
-    // two invoke_handler registrations must list the same prod commands.
-    #[cfg(debug_assertions)]
+    // The tauri-pilot socket server is debug tooling (issue #7; see
+    // `harness`): the plugin dependency (optional `pilot` feature in
+    // `Cargo.toml`) and its registration are both gated the same way, so
+    // a release binary contains no pilot code at all. The registration
+    // is the only way anything the `pilot:default` capability
+    // (`capabilities/pilot.toml`, fed in by `build.rs` only when the
+    // feature is on) grants becomes reachable — and it never happens in
+    // release. This handler table carries the debug-only fixture
+    // commands, so the two invoke_handler registrations must list the
+    // same prod commands.
+    #[cfg(all(debug_assertions, feature = "pilot"))]
     let builder =
         builder
             .plugin(tauri_plugin_pilot::init())
@@ -84,7 +90,7 @@ pub fn run() {
                 harness::harness_seed
             ]);
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(any(not(debug_assertions), not(feature = "pilot")))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         list_files,
         add_files,
@@ -96,6 +102,14 @@ pub fn run() {
         take_pending_share_paths,
         register_context_menu
     ]);
+
+    // Belt and braces: `pilot` is for dev tooling only. Release builds
+    // resolve default features (which exclude it), so anything accidentally
+    // enabling it in release — e.g. `cargo build --release -f pilot`,
+    // `tauri build --features pilot` — fails loudly here instead of
+    // shipping a drivable binary.
+    #[cfg(all(not(debug_assertions), feature = "pilot"))]
+    compile_error!("the `pilot` feature is debug tooling (harness/desktop/README.md); it must not be enabled in release builds");
 
     builder
         .run(tauri::generate_context!())
