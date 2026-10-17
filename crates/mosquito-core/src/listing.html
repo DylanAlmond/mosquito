@@ -26,9 +26,17 @@
         color: #000;
         background: #fff;
         font-synthesis: none;
+        --ink: #000;
+        --surface: #fff;
+        --muted: #777;
+        --radius: 0.5rem;
       }
       * {
         box-sizing: border-box;
+        margin: 0;
+      }
+      [hidden] {
+        display: none !important;
       }
       body {
         height: 100dvh;
@@ -38,6 +46,30 @@
         color: #000;
         font-size: 1rem;
         overflow: hidden;
+      }
+      button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        padding: 0;
+        color: inherit;
+        font: inherit;
+        transition: all 0.16s ease-out;
+        border: none;
+        background: transparent;
+      }
+      button:not(:disabled) {
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.5;
+      }
+      button svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
       }
       .page {
         display: flex;
@@ -74,6 +106,62 @@
         border-bottom: 2px solid #000;
         font-weight: 600;
       }
+      /* Grid rows: checkbox, content, trailing control — the desktop
+         list's grid with a download button where the app has delete. */
+      .files-header {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr) 32px;
+        align-items: center;
+        column-gap: 4px;
+        min-height: 3rem;
+        padding: 0 0.875rem;
+        border-bottom: 2px solid #000;
+        font-weight: 600;
+      }
+      .files-header .file-count {
+        display: block;
+        min-height: 0;
+        padding: 0;
+        border-bottom: none;
+      }
+      .file-count {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* The download button: icon-only where the app has its action
+         button, hidden (invisible, inert) until something is selected. */
+      .download-selected {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        padding: 0;
+        color: inherit;
+        justify-self: end;
+        visibility: hidden;
+      }
+      .download-selected.is-visible {
+        visibility: visible;
+      }
+      .download-selected:hover,
+      .download-selected:focus-visible {
+        opacity: 0.5;
+      }
+      .download-selected svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
+      }
+      /* Desktop list behavior: the entire row inverts, checkbox icon
+         included (the icons stroke with currentColor). */
+      .file-row:hover,
+      .file-row.is-selected {
+        background: #000;
+        color: #fff;
+      }
       .file-list {
         margin: 0;
         height: 100%;
@@ -83,7 +171,6 @@
         overscroll-behavior: contain;
         scrollbar-color: #000 transparent;
         scrollbar-width: thin;
-        
       }
       .file-list::-webkit-scrollbar {
         width: 6px;
@@ -92,8 +179,23 @@
         border-radius: 9999px;
         background: #000;
       }
-      .file-row + .file-row {
+      /* Rows and group headers are flat siblings; every row but the
+         first gets a top border, no matter what kind of row precedes
+         it — the desktop list's exact rule. */
+      .file-list > li {
         border-top: 1px solid #000;
+      }
+      .file-list > li:first-child {
+        border-top: none;
+      }
+      /* Member rows are flush-left: same grid as the header, checkbox
+         first, name and size filling the rest. */
+      .file-row {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 4px;
+        padding: 0 0.875rem;
       }
       .file-row a {
         display: flex;
@@ -101,17 +203,11 @@
         justify-content: space-between;
         gap: 0.75rem;
         min-height: 3rem;
-        padding: 0.5rem 0.875rem;
         color: inherit;
         text-decoration: none;
         transition:
           background-color 140ms ease,
           color 140ms ease;
-      }
-      .file-row a:hover,
-      .file-row a:focus-visible {
-        background: #000;
-        color: #fff;
       }
       .file-row a:focus-visible {
         outline: 2px solid #777;
@@ -124,6 +220,25 @@
       .file-row small {
         flex: 0 0 auto;
         font-size: 0.75rem;
+      }
+      /* Slim group header rows, background-tinted like the app. */
+      .group-header {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 4px;
+        min-height: 38px;
+        padding: 0 0.875rem;
+        background: #f1f1f1;
+        font-size: 0.875rem;
+        font-weight: 600;
+        line-height: 1;
+      }
+      .group-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .empty-state {
         margin: 0;
@@ -148,7 +263,8 @@
         color: #000;
       }
       @media (prefers-reduced-motion: reduce) {
-        .file-row a {
+        .file-row a,
+        button {
           transition: none;
         }
       }
@@ -158,7 +274,7 @@
     <main class="page">
       <header class="page-header"><h1>Mosquito</h1></header>
       <section class="listing" aria-label="Shared files">
-        <p class="file-count">{{FILE_COUNT}}</p>
+        {{LIST_HEADER}}
         {{FILE_CONTENT}}
       </section>
       <footer class="page-footer">
@@ -166,5 +282,128 @@
         <a href="https://github.com/DylanAlmond/mosquito" target="_blank" rel="noopener">GitHub</a>
       </footer>
     </main>
+    <script>
+      // Progressive enhancement only: with JavaScript off, the
+      // checkboxes never appear and the per-file links stay the only
+      // (and fully working) way to download.
+      (function () {
+        var checkboxes = Array.prototype.slice.call(
+          document.querySelectorAll('[data-select]')
+        );
+        var selectAll = document.getElementById('select-all');
+        var downloadButton = document.getElementById('download-selected');
+        if (!checkboxes.length || !selectAll || !downloadButton) return;
+
+        var selected = {};
+
+        function selectedIds() {
+          var ids = [];
+          for (var id in selected) {
+            if (selected[id]) ids.push(id);
+          }
+          return ids;
+        }
+
+        function membersOf(groupIndex) {
+          return checkboxes.filter(function (checkbox) {
+            var li = checkbox.closest('.file-row');
+            return li && li.dataset.groupIndex === groupIndex;
+          });
+        }
+
+        // Is every member of the group behind this checkbox selected?
+        function isGroupComplete(group) {
+          return membersOf(group.dataset.selectGroup).every(function (box) {
+            return selected[box.dataset.select] === true;
+          });
+        }
+
+        function selectedInGroup(group) {
+          return membersOf(group.dataset.selectGroup).filter(function (box) {
+            return selected[box.dataset.select] === true;
+          }).length;
+        }
+
+        function setBox(on, checkbox) {
+          checkbox.setAttribute('aria-checked', on ? 'true' : 'false');
+          var checked = checkbox.querySelector('.icon-checked');
+          var unchecked = checkbox.querySelector('.icon-unchecked');
+          if (checked) checked.style.display = on ? '' : 'none';
+          if (unchecked) unchecked.style.display = on ? 'none' : '';
+          var li = checkbox.closest('.file-row');
+          if (li) li.classList.toggle('is-selected', on);
+        }
+
+        function refresh() {
+          checkboxes.forEach(function (checkbox) {
+            setBox(selected[checkbox.dataset.select] === true, checkbox);
+          });
+
+          document.querySelectorAll('[data-select-group]').forEach(function (group) {
+            var count = selectedInGroup(group);
+            var members = membersOf(group.dataset.selectGroup);
+            // Desktop mirrors aria-checked="mixed" for partially
+            // selected groups while still showing the unchecked icon.
+            setBox(count === members.length, group);
+            if (count > 0 && count < members.length) {
+              group.setAttribute('aria-checked', 'mixed');
+            }
+          });
+
+          var ids = selectedIds();
+          var every = ids.length > 0 && ids.length === checkboxes.length;
+          setBox(every, selectAll);
+          selectAll.setAttribute(
+            'aria-checked',
+            ids.length === 0 ? 'false' : every ? 'true' : 'mixed'
+          );
+
+          // The download button hides when nothing is selected; one
+          // file links directly, several becomes a zip of the selection.
+          if (ids.length === 0) {
+            downloadButton.classList.remove('is-visible');
+            downloadButton.href = '/download/zip';
+          } else if (ids.length === 1) {
+            downloadButton.classList.add('is-visible');
+            downloadButton.href = '/download/' + ids[0];
+          } else {
+            downloadButton.classList.add('is-visible');
+            downloadButton.href = '/download/zip?ids=' + ids.join(',');
+          }
+        }
+
+        checkboxes.forEach(function (checkbox) {
+          checkbox.hidden = false;
+          checkbox.addEventListener('click', function () {
+            var id = checkbox.dataset.select;
+            selected[id] = !selected[id];
+            refresh();
+          });
+        });
+
+        selectAll.hidden = false;
+        selectAll.addEventListener('click', function () {
+          // "every" after this click is when every file is selected now.
+          var every = selectedIds().length === checkboxes.length;
+          checkboxes.forEach(function (checkbox) {
+            selected[checkbox.dataset.select] = !every;
+          });
+          refresh();
+        });
+
+        document.querySelectorAll('[data-select-group]').forEach(function (group) {
+          group.hidden = false;
+          group.addEventListener('click', function () {
+            var every = isGroupComplete(group);
+            membersOf(group.dataset.selectGroup).forEach(function (box) {
+              selected[box.dataset.select] = !every;
+            });
+            refresh();
+          });
+        });
+
+        refresh();
+      })();
+    </script>
   </body>
 </html>

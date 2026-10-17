@@ -17,7 +17,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::file_store::{FileId, FileStore, SharedFile};
+use crate::file_store::{FileId, FileStore, FolderProvenance, SharedFile};
 
 /// State shared by every handler. Cheap to clone (it's an Arc).
 #[derive(Clone)]
@@ -454,40 +454,152 @@ fn device_name() -> String {
 }
 
 /// The page a phone sees after scanning the QR code.
+///
+/// Rendering mirrors the desktop list (`FileList.vue`): file checkboxes
+/// plus a select-all use the app's checkbox styling, folder groups are
+/// slim header rows with member rows below them, and the action button
+/// where the app has "Delete selected" is the icon-only download button.
 fn render_listing(files: &[SharedFile], device_name: &str) -> String {
-    let items: String = files
-        .iter()
-        .map(|f| {
-            format!(
-                "<li class=\"file-row\"><a href=\"/download/{id}\"><span>{name}</span><small>{size}</small></a></li>",
-                id = f.id.0,
-                name = escape_html(&f.name),
-                size = format_size(f.size),
-            )
-        })
-        .collect();
+    // Grouping is derived at render time (ADR-0001): loose files lead,
+    // then one group per distinct folder root in first-appearance
+    // order — the desktop list's exact layout.
+    //
+    /// One folder group's rendered header + member rows.
+    struct GroupHtml {
+        html: String,
+    }
 
-    let (file_count, file_content) = if files.is_empty() {
+    let mut loose = String::new();
+    let mut groups: Vec<GroupHtml> = Vec::new();
+    // Keys are the root's lossy string form. Two distinct non-UTF-8
+    // roots could collapse into one group; the desktop's string-keyed
+    // `folderRoot` grouping is shaped the same, so parity keeps the two
+    // pages aligned.
+    let mut group_index: HashMap<String, usize> = HashMap::new();
+
+    for file in files {
+        match &file.provenance {
+            None => loose.push_str(&file_row_html(file, None)),
+            Some(provenance) => {
+                let root = provenance.folder_root.to_string_lossy().into_owned();
+
+                let index = match group_index.get(&root) {
+                    Some(&index) => index,
+                    None => {
+                        let display_name = provenance
+                            .folder_root
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let index = groups.len();
+                        groups.push(GroupHtml {
+                            html: format!(
+                                "<li class=\"group-header\" role=\"row\" data-group-index=\"{index}\">\
+<button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select all files in {name}\" data-select-group=\"{index}\" hidden>\
+{unchecked_svg}{checked_svg}\
+</button>\
+<span class=\"group-name\">{name}</span></li>",
+                                name = escape_html(&display_name),
+                                unchecked_svg = UNCHECKED_BOX_SVG,
+                                checked_svg = CHECKED_BOX_SVG,
+                            ),
+                        });
+                        group_index.insert(root, index);
+                        index
+                    }
+                };
+
+                groups[index].html.push_str(&file_row_html(
+                    file,
+                    Some((provenance, index)),
+                ));
+            }
+        }
+    }
+
+    let mut items = loose;
+    for group in groups {
+        items.push_str(&group.html);
+    }
+
+    let (header, list_html) = if files.is_empty() {
         (
-            "Shared files".to_string(),
+            "<p class=\"file-count\">Shared files</p>".to_string(),
             "<p class=\"empty-state\">Nothing is being shared right now.</p>".to_string(),
         )
     } else {
         (
             format!(
-                "{} file{} available",
-                files.len(),
-                if files.len() == 1 { "" } else { "s" }
+                "<div class=\"files-header\" role=\"row\">\
+<button id=\"select-all\" type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select all shared files\" hidden>\
+{unchecked}{checked}\
+</button>\
+<p class=\"file-count\">{count}</p>\
+<a id=\"download-selected\" class=\"download-selected\" href=\"/download/zip\" aria-label=\"Download selected files\">\
+{download_icon}\
+</a>\
+</div>",
+                count = format!(
+                    "{} file{} available",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                ),
+                unchecked = UNCHECKED_BOX_SVG,
+                checked = CHECKED_BOX_SVG,
+                download_icon = DOWNLOAD_ICON_SVG,
             ),
-            format!("<ul class=\"file-list\">{items}</ul>"),
+            format!("<ul class=\"file-list\" role=\"rowgroup\">{items}</ul>"),
         )
     };
 
     include_str!("listing.html")
-        .replace("{{FILE_COUNT}}", &file_count)
+        .replace("{{LIST_HEADER}}", &header)
         .replace("{{DEVICE_NAME}}", &escape_html(device_name))
-        .replace("{{FILE_CONTENT}}", &file_content)
+        .replace("{{FILE_CONTENT}}", &list_html)
 }
+
+/// One selectable file row: a plain download link (works without
+/// JavaScript) wrapped around the name and size, with the selection
+/// checkbox beside it — revealed only when JavaScript runs. Members of
+/// a folder group pass their provenance plus the group's render-order
+/// index, which links the row to its group's checkbox.
+fn file_row_html(file: &SharedFile, group: Option<(&FolderProvenance, usize)>) -> String {
+    // Inside a group the row shows where it hangs under the folder
+    // root; loose files keep their display name (desktop
+    // `memberTitle()`).
+    let title = match group {
+        Some((provenance, _)) => provenance.relative_path.as_str(),
+        None => file.name.as_str(),
+    };
+
+    let group_attr = group
+        .map(|(_, index)| format!(" data-group-index=\"{index}\""))
+        .unwrap_or_default();
+
+    format!(
+        "<li class=\"file-row\" role=\"row\"{group_attr}>\
+<button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select {title}\" data-select=\"{id}\" hidden>\
+{unchecked_svg}{checked_svg}\
+</button>\
+<a href=\"/download/{id}\"><span>{title}</span><small>{size}</small></a>\
+</li>",
+        id = file.id.0,
+        title = escape_html(title),
+        size = format_size(file.size),
+        unchecked_svg = UNCHECKED_BOX_SVG,
+        checked_svg = CHECKED_BOX_SVG,
+    )
+}
+
+/// The app's checkbox artwork (desktop `square-rounded.svg`), inlined so
+/// the listing stays a single self-contained page.
+const UNCHECKED_BOX_SVG: &str = "<svg class=\"icon-unchecked\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M12 3c7.2 0 9 1.8 9 9c0 7.2 -1.8 9 -9 9c-7.2 0 -9 -1.8 -9 -9c0 -7.2 1.8 -9 9 -9\" /></svg>";
+
+const CHECKED_BOX_SVG: &str = "<svg class=\"icon-checked\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M9 12l2 2l4 -4\" /><path d=\"M12 3c7.2 0 9 1.8 9 9c0 7.2 -1.8 9 -9 9c-7.2 0 -9 -1.8 -9 -9c0 -7.2 1.8 -9 9 -9\" /></svg>";
+
+/// The project's download icon (desktop `download.svg`), for the
+/// icon-only download button where the app has "Delete selected".
+const DOWNLOAD_ICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2\" /><path d=\"M7 11l5 5l5 -5\" /><path d=\"M12 4l0 12\" /></svg>";
 
 #[cfg(test)]
 mod tests {
@@ -678,6 +790,73 @@ mod tests {
     }
 
     #[test]
+    fn listing_loose_files_come_before_folder_groups() {
+        let files = vec![
+            member(0, "b.txt", "Photos", "sub/b.txt"),
+            shared_file(1, "a.txt", None),
+            member(2, "a.txt", "Photos", "a.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        // Loose files lead, ungrouped; each folder group appears at its
+        // first member's position (first-appearance order).
+        let loose = html.find("href=\"/download/1\"").unwrap();
+        let group = html.find("class=\"group-header\"").unwrap();
+        let member = html.find("sub/b.txt").unwrap();
+        assert!(loose < group, "loose files first");
+        assert!(group < member, "grouped members under their header");
+    }
+
+    #[test]
+    fn listing_escapes_folder_root_names_and_shows_their_members_flush_left() {
+        let files = vec![
+            member(0, "a.txt", "<script>", "vacation/beach.jpg"),
+            shared_file(1, "b.txt", None),
+            member(2, "b.txt", "<script>", "trip/notes.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        // The display name is the root's own name, escaped like any text.
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<span class=\"group-name\"><script>"));
+        // Both members belong to the same root, so exactly one header
+        // row carries both; member rows are keyed for the group toggle.
+        assert_eq!(
+            html.matches("data-select-group=\"").count(),
+            1,
+            "one header per distinct folder root"
+        );
+        // 1 header + 2 members: members reference their group.
+        assert_eq!(html.matches("data-group-index=\"0\"").count(), 3);
+    }
+
+    #[test]
+    fn listing_renders_desktop_style_selection_ui() {
+        let files = vec![shared_file(0, "a.txt", None)];
+
+        let html = render_listing(&files, "test-device");
+
+        // Select-all checkbox in the header, per-file checkboxes in rows,
+        // using the app's own square-rounded checkbox artwork.
+        assert!(html.contains("aria-label=\"Select all shared files\""));
+        assert!(html.contains("data-select=\"0\" hidden"));
+        assert!(html.contains("icon-checked"));
+        // The download button starts hidden: selection is empty and the
+        // inline script only reveals it once something is selected.
+        assert!(html.contains("id=\"download-selected\" class=\"download-selected\""));
+        assert!(!html.contains("download-selected is-visible"));
+        // Selection is wired by an inline vanilla script: no framework
+        // and no build step anywhere in the page.
+        assert!(html.contains("<script>"));
+        assert!(html.contains("addEventListener"));
+        // Plain per-file download links remain, so downloads work with
+        // JavaScript disabled.
+        assert!(html.contains("href=\"/download/0\""));
+    }
+
+    #[test]
     fn listing_escapes_names_and_links_ids() {
         let files = vec![SharedFile {
             id: FileId(0),
@@ -692,7 +871,10 @@ mod tests {
         assert!(html.contains("&lt;script&gt;.txt"));
         assert!(html.contains("href=\"/download/0\""));
         assert!(html.contains("42 B"));
-        assert!(!html.contains("<script>"));
+        // Narrowed to the raw name: the page now legitimately contains
+        // its own enhancement <script>, so the whole-document check the
+        // old assertion made no longer applies.
+        assert!(!html.contains("<script>.txt"));
         assert!(
             html.find("class=\"file-count\"").unwrap() < html.find("class=\"file-list\"").unwrap()
         );
