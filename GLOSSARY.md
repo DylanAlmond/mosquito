@@ -6,6 +6,10 @@ Terms are listed alphabetically. Keep this file free of implementation details â
 
 Registering a file that already exists on the user's disk with the sharer, so it becomes available for download over the local network. Nothing is copied, transferred, or "uploaded" â€” the server streams the file's bytes from its on-disk location when a device downloads it. The canonical verb is **add**; "upload" is not a term in this domain.
 
+## Archive entry path
+
+A shared file's path inside a zip archive, derived at download time: a folder member keeps its **folder root**'s name as a prefix over its **relative path** (`Photos/vacation/beach.jpg`); a **loose file** sits at the archive root under its display name. Colliding entry paths get numeric suffixes (` (2)`) so nothing is dropped. Distinct from the on-disk path, which stays absolute and never enters the archive.
+
 ## Content-Disposition encoding
 
 The header treatment that gives downloads a safe filename, including RFC 5987 UTF-8 encoding for non-ASCII names. Reused by any new download surface (including zip archives).
