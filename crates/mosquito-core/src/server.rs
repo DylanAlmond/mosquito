@@ -682,11 +682,22 @@ mod tests {
 
     use crate::file_store::FolderProvenance;
 
+    /// A fake location that still splits on the platform's separators:
+    /// a literal `C:\nowhere\Photos` is one component on Linux (where
+    /// `\` is not a separator), so `file_name()` returned the whole
+    /// fabricated prefix and the archive layout tests failed there.
+    /// Nothing is ever created on disk — the planning is pure.
+    fn nowhere(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mosquito-nowhere")
+            .join(name)
+    }
+
     fn shared_file(id: u64, name: &str, provenance: Option<FolderProvenance>) -> SharedFile {
         SharedFile {
             id: FileId(id),
             name: name.into(),
-            path: PathBuf::from(format!("C:\\nowhere\\{name}")),
+            path: nowhere(name),
             size: 1,
             provenance,
         }
@@ -697,7 +708,7 @@ mod tests {
             id,
             name,
             Some(FolderProvenance {
-                folder_root: PathBuf::from(format!("C:\\nowhere\\{root}")),
+                folder_root: nowhere(root),
                 relative_path: relative_path.into(),
             }),
         )
