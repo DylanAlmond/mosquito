@@ -6,6 +6,10 @@
   --surface: #fff;
   --muted: #777;
   --radius: 0.5rem;
+  /* Folder-tree shading token: the grey an expanded folder's whole
+     region sits on. Shared with the web listing's own stylesheet copy
+     (the established design-token duplication — light scheme only). */
+  --folder-shade: #f1f1f1;
 
   font-size: 16px;
   color: var(--ink);

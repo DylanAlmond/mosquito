@@ -1,31 +1,90 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import ChevronIcon from '../assets/chevron-compact-up.svg';
 import CheckedIcon from '../assets/square-rounded-check.svg';
 import UncheckedIcon from '../assets/square-rounded.svg';
 import TrashIcon from '../assets/trash-x.svg';
 import { useSharer } from '../composables/useSharer';
-import { groupSharedFiles, type FolderGroup } from '../lib/folderGroups';
+import { buildFolderTree, type FolderNode } from '../lib/folderTree';
 import type { SharedFile } from '../types';
 
 const { files, busy, remove, removeMany } = useSharer();
 
 const selectedIds = ref<number[]>([]);
 
-/// Grouping is derived at render time (ADR-0001); the store stays flat.
-/// Members keep their position in the shared list, so groups appear in
-/// first-appearance order. Loose files lead, ungrouped.
-const grouped = computed(() => groupSharedFiles(files.value));
+/// The folder tree is derived at render time (ADR-0002); the store stays
+/// flat. Members keep their position in the shared list, so roots and
+/// subfolders appear in first-appearance order.
+const tree = computed(() => buildFolderTree(files.value));
 
-type Row = { kind: 'header'; group: FolderGroup } | { kind: 'file'; file: SharedFile };
+/// Expansion is UI-held state keyed by folder root + subfolder path
+/// (ADR-0002): it survives re-reads after every action and resets when
+/// the app restarts — it is never persisted. Roots default expanded,
+/// subfolders default collapsed; a checked key means "away from the
+/// default". Root key: the folder root itself (no subfolder path).
+const collapsedRoots = ref(new Set<string>());
+const expandedSubfolders = ref(new Set<string>());
+
+function rootKey(node: FolderNode) {
+  return node.folderRoot;
+}
+
+function subKey(node: FolderNode) {
+  return `${node.folderRoot}\u0000${node.subPath}`;
+}
+
+function isExpanded(node: FolderNode) {
+  return node.subPath === ''
+    ? !collapsedRoots.value.has(rootKey(node))
+    : expandedSubfolders.value.has(subKey(node));
+}
+
+function toggleFolder(node: FolderNode) {
+  if (node.subPath === '') {
+    const key = rootKey(node);
+    const next = new Set(collapsedRoots.value);
+    next.has(key) ? next.delete(key) : next.add(key);
+    collapsedRoots.value = next;
+  } else {
+    const key = subKey(node);
+    const next = new Set(expandedSubfolders.value);
+    next.has(key) ? next.delete(key) : next.add(key);
+    expandedSubfolders.value = next;
+  }
+}
+
+/// Shading alternates per depth — never indentation (ADR-0002): an
+/// expanded folder's whole region takes this shade, and a collapsed
+/// folder row falls back to the shade it inherited.
+type Shade = 0 | 1;
+
+/// The shade an expanded folder paints over itself and everything
+/// inside it: grey at even depth, back to the plain surface at odd.
+function expandedRegionShade(depth: number): Shade {
+  return depth % 2 === 0 ? 1 : 0;
+}
+
+type Row =
+  | { kind: 'file'; file: SharedFile; shade: Shade }
+  | { kind: 'folder'; node: FolderNode; depth: number; shade: Shade };
+
+function folderRows(node: FolderNode, parentShade: Shade): Row[] {
+  const open = isExpanded(node);
+  const shade: Shade = open ? expandedRegionShade(node.depth) : parentShade;
+  const out: Row[] = [{ kind: 'folder', node, depth: node.depth, shade }];
+
+  if (!open) return out;
+
+  for (const file of node.files) out.push({ kind: 'file', file, shade });
+  for (const child of node.children) out.push(...folderRows(child, shade));
+  return out;
+}
 
 const rows = computed<Row[]>(() => {
-  const { loose, groups } = grouped.value;
+  const { loose, roots } = tree.value;
   return [
-    ...loose.map((file): Row => ({ kind: 'file', file })),
-    ...groups.flatMap((group): Row[] => [
-      { kind: 'header', group },
-      ...group.files.map((file): Row => ({ kind: 'file', file }))
-    ])
+    ...loose.map((file): Row => ({ kind: 'file', file, shade: 0 })),
+    ...roots.flatMap((root): Row[] => folderRows(root, 0))
   ];
 });
 
@@ -57,17 +116,27 @@ function toggleFile(id: number) {
 }
 
 /// Cosmetic grouping: selection always operates on individual file ids,
-/// so group headers toggle members in bulk but own nothing themselves.
-function groupCheckState(group: FolderGroup): 'checked' | 'mixed' | 'unchecked' {
-  if (group.files.every((file) => selectedIds.value.includes(file.id))) return 'checked';
-  if (group.files.some((file) => selectedIds.value.includes(file.id))) return 'mixed';
+/// so folder rows toggle their whole subtree in bulk but own nothing
+/// themselves — members hidden inside collapsed subfolders included.
+function nodeMemberIds(node: FolderNode): number[] {
+  return [
+    ...node.files.map((file) => file.id),
+    ...node.children.flatMap((child) => nodeMemberIds(child))
+  ];
+}
+
+function nodeCheckState(node: FolderNode): 'checked' | 'mixed' | 'unchecked' {
+  const memberIds = nodeMemberIds(node);
+
+  if (memberIds.every((id) => selectedIds.value.includes(id))) return 'checked';
+  if (memberIds.some((id) => selectedIds.value.includes(id))) return 'mixed';
   return 'unchecked';
 }
 
-function toggleGroup(group: FolderGroup) {
-  const memberIds = group.files.map((file) => file.id);
+function toggleNode(node: FolderNode) {
+  const memberIds = nodeMemberIds(node);
 
-  if (groupCheckState(group) === 'checked') {
+  if (nodeCheckState(node) === 'checked') {
     selectedIds.value = selectedIds.value.filter((id) => !memberIds.includes(id));
   } else {
     const unselected = memberIds.filter((id) => !selectedIds.value.includes(id));
@@ -75,10 +144,17 @@ function toggleGroup(group: FolderGroup) {
   }
 }
 
-/// Inside a group the file shows where it hangs under the folder root;
-/// loose files keep their basename (the full path stays in the row title).
+/// Rows show the file's own name; where it hangs under the root is the
+/// tree's job now. The full path stays in the row title.
 function memberTitle(file: SharedFile) {
-  return file.provenance?.relative_path ?? file.name;
+  return file.name;
+}
+
+function rowTitle(row: Row) {
+  if (row.kind === 'file') return row.file.path;
+  return row.node.subPath
+    ? `${row.node.folderRoot}/${row.node.subPath}`
+    : row.node.folderRoot;
 }
 
 function toggleAll() {
@@ -129,34 +205,46 @@ function removeSelected() {
     </div>
 
     <ul class="file-rows thin-scrollbar" role="rowgroup">
-      <template v-for="row in rows" :key="row.kind === 'header' ? row.group.folderRoot : row.file.id">
+      <template v-for="row in rows" :key="row.kind === 'file' ? row.file.id : `${row.node.folderRoot}/${row.node.subPath}`">
         <li
-          v-if="row.kind === 'header'"
-          class="group-header"
+          v-if="row.kind === 'folder'"
+          class="folder-row"
           role="row"
-          :title="row.group.folderRoot"
+          :class="{ 'shade-1': row.shade === 1 }"
+          :title="rowTitle(row)"
         >
           <button
             class="checkbox-control"
             type="button"
             role="checkbox"
-            :aria-checked="groupCheckState(row.group) === 'checked' ? 'true' : groupCheckState(row.group) === 'mixed' ? 'mixed' : 'false'"
-            :aria-label="`Select or deselect all files in ${row.group.name}`"
+            :aria-checked="nodeCheckState(row.node) === 'checked' ? 'true' : nodeCheckState(row.node) === 'mixed' ? 'mixed' : 'false'"
+            :aria-label="`Select or deselect all files in ${row.node.name}`"
             :disabled="busy"
-            @click="toggleGroup(row.group)"
+            @click="toggleNode(row.node)"
           >
-            <CheckedIcon v-if="groupCheckState(row.group) === 'checked'" />
+            <CheckedIcon v-if="nodeCheckState(row.node) === 'checked'" />
             <UncheckedIcon v-else />
           </button>
 
-          <span class="group-name">{{ row.group.name }}</span>
+          <button
+            class="folder-chevron"
+            :class="{ 'is-collapsed': !isExpanded(row.node) }"
+            type="button"
+            :aria-expanded="isExpanded(row.node) ? 'true' : 'false'"
+            :aria-label="`${isExpanded(row.node) ? 'Collapse' : 'Expand'} ${row.node.name}`"
+            @click="toggleFolder(row.node)"
+          >
+            <ChevronIcon />
+          </button>
+
+          <span class="folder-name">{{ row.node.name }}</span>
         </li>
 
         <li
           v-else
           class="file-row"
-          :class="{ 'is-selected': isSelected(row.file.id) }"
-          :title="row.file.path"
+          :class="{ 'is-selected': isSelected(row.file.id), 'shade-1': row.shade === 1 }"
+          :title="rowTitle(row)"
           role="row"
           :aria-selected="isSelected(row.file.id)"
           @click="toggleFile(row.file.id)"
@@ -230,28 +318,47 @@ function removeSelected() {
     color 140ms ease;
 }
 
-/* Rows and group headers are flat siblings; every row but the first gets
-   a top border, no matter what kind of row precedes it. */
+/* Rows are flat siblings; every row but the first gets a top border,
+   no matter what kind of row precedes it. */
 .file-rows > li:not(:first-child) {
   border-top: 1px solid var(--ink);
 }
 
-.group-header {
-  grid-template-columns: 32px minmax(0, 1fr);
+/* The shared shade token (style.css) — no indentation, and the whole
+   expanded folder incl. its contents reads as one region. */
+.shade-1 {
+  background: var(--folder-shade);
+}
+
+.folder-row {
+  display: grid;
+  grid-template-columns: 32px 32px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 4px;
   min-height: 38px;
   padding: 0 10px;
-  background: #f1f1f1;
   color: var(--ink);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1;
 }
 
-.group-name {
+.folder-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.folder-chevron svg {
+  display: block;
+  width: 1.5rem;
+  height: 1.5rem;
+  transition: transform 140ms ease;
+}
+
+.folder-chevron.is-collapsed svg {
+  transform: rotate(180deg);
 }
 
 .file-row:hover,

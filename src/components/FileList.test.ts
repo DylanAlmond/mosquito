@@ -71,71 +71,147 @@ describe('FileList', () => {
     ];
   });
 
-  it('renders loose files first, then one header per folder root with its members', () => {
+  function mountList() {
     useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
+    return mount(FileList);
+  }
 
-    const rows = wrapper.findAll('.file-rows > li');
-    const names = rows.map((row) => {
+  function rowTexts(wrapper: ReturnType<typeof mountList>): string[] {
+    return wrapper.findAll('.file-rows > li').map((row) => {
       const name = row.find('.file-name');
-      return (name.exists() ? name : row.find('.group-name')).text();
+      return (name.exists() ? name : row.find('.folder-name')).text();
     });
-    const headers = rows.filter((row) => row.classes().includes('group-header'));
+  }
 
-    expect(names).toEqual([
+  function folderRow(wrapper: ReturnType<typeof mountList>, name: string) {
+    return wrapper
+      .findAll('.folder-row')
+      .find((row) => row.find('.folder-name').text() === name)!;
+  }
+
+  it('renders loose files, then each folder root expanded with its direct files before its collapsed subfolders', () => {
+    const wrapper = mountList();
+
+    // Subfolder contents (vacation/beach.jpg) are not rendered collapsed.
+    expect(rowTexts(wrapper)).toEqual([
       'notes.txt',
       'Photos',
-      'vacation/beach.jpg',
+      'beach.jpg',
+      'vacation',
+      'Docs',
+      'a.txt'
+    ]);
+
+    // Roots start expanded, subfolders start collapsed.
+    expect(folderRow(wrapper, 'Photos')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
+      'true'
+    );
+    expect(folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
+      'false'
+    );
+    expect(rowTexts(wrapper)).not.toContain('vacation/beach.jpg');
+  });
+
+  it('toggles a subfolder through its chevron only — not by clicking the row or its name', async () => {
+    const wrapper = mountList();
+
+    // Row and name clicks must never change expansion (chevron-only).
+    await folderRow(wrapper, 'vacation')!.trigger('click');
+    await folderRow(wrapper, 'vacation')!.find('.folder-name').trigger('click');
+    expect(rowTexts(wrapper)).not.toContain('vacation/beach.jpg');
+
+    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
+    expect(rowTexts(wrapper)).toEqual([
+      'notes.txt',
+      'Photos',
+      'beach.jpg',
+      'vacation',
       'beach.jpg',
       'Docs',
       'a.txt'
     ]);
-    expect(headers).toHaveLength(2);
-    expect(headers.map((h) => h.find('.group-name').text())).toEqual(['Photos', 'Docs']);
-  });
-
-  it('group header checkbox selects and deselects all of that folder\u2019s members', async () => {
-    useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
-
-    const photosHeader = wrapper
-      .findAll('.group-header')
-      .find((row) => row.find('.group-name').text() === 'Photos')!;
-
-    await photosHeader.find('.checkbox-control').trigger('click');
-
+    expect(folderRow(wrapper, 'vacation')!.attributes('aria-expanded')).toBeUndefined();
     expect(
-      wrapper.findAll('.file-row').map((row) => row.classes().includes('is-selected'))
-    ).toEqual([false, true, true, false]);
-
-    await photosHeader.find('.checkbox-control').trigger('click');
-
-    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+      folderRow(wrapper, 'vacation')!.find('[aria-label="Collapse vacation"]').attributes(
+        'aria-expanded'
+      )
+    ).toBe('true');
   });
 
-  it('group header checkbox reads mixed when only part of the group is selected', async () => {
-    useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
+  it('checks a folder checkbox when only some descendants are selected — hidden members included', async () => {
+    const wrapper = mountList();
 
-    const photosHeader = wrapper
-      .findAll('.group-header')
-      .find((row) => row.find('.group-name').text() === 'Photos')!;
+    const photosRow = folderRow(wrapper, 'Photos')!;
+    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    // Selecting twice sets everything, then deselects everything again:
+    // subtree counts both the visible beach.jpg and the one folded away
+    // inside the collapsed `vacation` subfolder.
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('false');
 
-    await photosHeader.find('.checkbox-control').trigger('click');
-    const memberRow = wrapper.findAll('.file-row').find((row) => row.text() === 'beach.jpg')!;
-    await memberRow.trigger('click'); // row click toggles the member off
+    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    // ... full subtree now selected (aria-checked true).
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('true');
 
-    expect(photosHeader.find('.checkbox-control').attributes('aria-checked')).toBe('mixed');
+    // The visible member drops out; the hidden member still keeps
+    // Photos part-selected, which is only visible as a "mixed" checkbox.
+    const visibleBeach = wrapper
+      .findAll('.file-row')
+      .find((row) => row.text() === 'beach.jpg')!;
+    await visibleBeach.trigger('click');
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('mixed');
+  });
+
+  it('a subfolder row acts on its own subtree only', async () => {
+    const wrapper = mountList();
+
+    // Expand `vacation`, then act on the subfolder itself.
+    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
+
+    const vacationRow = folderRow(wrapper, 'vacation')!;
+    await vacationRow
+      .find('[aria-label="Select or deselect all files in vacation"]')
+      .trigger('click');
+
+    const selected = wrapper.findAll('.file-row.is-selected').map((row) => row.text());
+    // Exactly one row is highlighted: the member inside `vacation`.
+    // Note `Photos` shows the same basename for its other member; only
+    // one of them is selected.
+    expect(selected).toHaveLength(1);
+
+    // The parent folder reflects a partial select: one of its two members.
+    expect(
+      folderRow(wrapper, 'Photos')!.find('[aria-checked]').attributes('aria-checked')
+    ).toBe('mixed');
+  });
+
+  it('keeps collapse state when the store re-reads files after an action', async () => {
+    const wrapper = mountList();
+
+    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
+
+    // The next re-read lands the same members again (any action
+    // triggers one; assigning is what every action ends with).
+    useSharer().files.value = [...sharedFiles];
+
+    // The expanded subfolder survives the re-read…
+    expect(
+      folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')
+    ).toBe('true');
+
+    // …and so does the collapsed one.
+    await folderRow(wrapper, 'vacation')!.find('[aria-label="Collapse vacation"]').trigger('click');
+    useSharer().files.value = [...sharedFiles];
+    expect(
+      folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')
+    ).toBe('false');
   });
 
   it('delete selected removes loose file and every folder member it was grouped with', async () => {
-    useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
+    const wrapper = mountList();
 
-    const docsHeader = wrapper
-      .findAll('.group-header')
-      .find((row) => row.find('.group-name').text() === 'Docs')!;
-    await docsHeader.find('.checkbox-control').trigger('click');
+    const docsRow = folderRow(wrapper, 'Docs')!;
+    await docsRow.find('[aria-label="Select or deselect all files in Docs"]').trigger('click');
 
     const looseRow = wrapper.findAll('.file-row').find((row) => row.text() === 'notes.txt')!;
     await looseRow.trigger('click');
@@ -149,24 +225,16 @@ describe('FileList', () => {
     expect(removedIds.sort()).toEqual([2, 3]);
   });
 
-  it('removing a folder\u2019s last member removes its header too', async () => {
-    useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
+  it('removing a folder\u2019s last member removes its folder row too', async () => {
+    const wrapper = mountList();
 
-    const docsHeader = wrapper
-      .findAll('.group-header')
-      .find((row) => row.find('.group-name').text() === 'Docs')!;
-    await docsHeader.find('.checkbox-control').trigger('click');
+    const docsRow = folderRow(wrapper, 'Docs')!;
+    await docsRow.find('[aria-label="Select or deselect all files in Docs"]').trigger('click');
     await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
     await wrapper.vm.$nextTick();
     await wrapper.vm.$nextTick();
 
-    const headers = wrapper.findAll('.group-header');
-    expect(headers.map((h) => h.find('.group-name').text())).toEqual(['Photos']);
-    expect(wrapper.findAll('.file-row').map((r) => r.text())).toEqual([
-      'notes.txt',
-      'vacation/beach.jpg',
-      'beach.jpg'
-    ]);
+    expect(folderRow(wrapper, 'Docs')).toBeUndefined();
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'vacation']);
   });
 });
