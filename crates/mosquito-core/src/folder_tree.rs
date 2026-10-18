@@ -244,10 +244,13 @@ mod tests {
                 name: entry.name.clone(),
                 path: PathBuf::from(&entry.path),
                 size: entry.size,
-                provenance: entry.provenance.as_ref().map(|provenance| FolderProvenance {
-                    folder_root: PathBuf::from(&provenance.folder_root),
-                    relative_path: provenance.relative_path.clone(),
-                }),
+                provenance: entry
+                    .provenance
+                    .as_ref()
+                    .map(|provenance| FolderProvenance {
+                        folder_root: PathBuf::from(&provenance.folder_root),
+                        relative_path: provenance.relative_path.clone(),
+                    }),
             })
             .collect()
     }
@@ -287,15 +290,26 @@ mod tests {
             ids(&node.files),
             expected.files
         );
-        let children: Vec<&str> = node.children.iter().map(|child| child.name.as_str()).collect();
-        let expected_children: Vec<&str> =
-            expected.children.iter().map(|child| child.name.as_str()).collect();
+        let children: Vec<&str> = node
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect();
+        let expected_children: Vec<&str> = expected
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect();
         assert!(
             children == expected_children,
             "{FIXTURE}: {spot}: children (first-appearance order) {children:?} disagree with the fixture's {expected_children:?}"
         );
         for (index, child) in expected.children.iter().enumerate() {
-            assert_node(&node.children[index], child, &format!("{spot}/{}", child.name));
+            assert_node(
+                &node.children[index],
+                child,
+                &format!("{spot}/{}", child.name),
+            );
         }
     }
 
@@ -318,8 +332,12 @@ mod tests {
         );
 
         let root_names: Vec<&str> = tree.roots.iter().map(|root| root.name.as_str()).collect();
-        let expected_names: Vec<&str> =
-            fixture.outline.roots.iter().map(|root| root.name.as_str()).collect();
+        let expected_names: Vec<&str> = fixture
+            .outline
+            .roots
+            .iter()
+            .map(|root| root.name.as_str())
+            .collect();
         assert!(
             root_names == expected_names,
             "{FIXTURE}: root names in first-appearance order {root_names:?} disagree with the fixture's {expected_names:?}"

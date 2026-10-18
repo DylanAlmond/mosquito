@@ -265,7 +265,10 @@ const UNCHECKED_BOX_SVG: &str = "<svg class=\"icon-unchecked\" xmlns=\"http://ww
 const CHECKED_BOX_SVG: &str = "<svg class=\"icon-checked\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M9 12l2 2l4 -4\" /><path d=\"M12 3c7.2 0 9 1.8 9 9c0 7.2 -1.8 9 -9 9c-7.2 0 -9 -1.8 -9 -9c0 -7.2 1.8 -9 9 -9\" /></svg>";
 
 /// The project's download icon, for the
-/// icon-only download button where the app has "Delete selected".
+/// icon-only download button where the app has "Delete selected". The
+/// desktop list inlines its own copy in `FileList.vue` (the deleted
+/// shared asset went unused); visual language is mirrored by duplicated
+/// tokens, not shared assets — ADR-0003.
 const DOWNLOAD_ICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" /><path d=\"M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2\" /><path d=\"M7 11l5 5l5 -5\" /><path d=\"M12 4l0 12\" /></svg>";
 
 /// The desktop's chevron artwork (`chevron-compact-up.svg`) for the
@@ -276,39 +279,9 @@ const CHEVRON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    use crate::file_store::{FileId, FolderProvenance};
-
-    /// A fake location that still splits on the platform's separators:
-    /// a literal `C:\nowhere\Photos` is one component on Linux (where
-    /// `\` is not a separator), so `file_name()` returned the whole
-    /// fabricated prefix and the archive layout tests failed there.
-    /// Nothing is ever created on disk — the planning is pure.
-    fn nowhere(name: &str) -> PathBuf {
-        std::env::temp_dir().join("mosquito-nowhere").join(name)
-    }
-
-    fn shared_file(id: u64, name: &str, provenance: Option<FolderProvenance>) -> SharedFile {
-        SharedFile {
-            id: FileId(id),
-            name: name.into(),
-            path: nowhere(name),
-            size: 1,
-            provenance,
-        }
-    }
-
-    fn member(id: u64, name: &str, root: &str, relative_path: &str) -> SharedFile {
-        shared_file(
-            id,
-            name,
-            Some(FolderProvenance {
-                folder_root: nowhere(root),
-                relative_path: relative_path.into(),
-            }),
-        )
-    }
+    use crate::file_store::FileId;
+    use crate::test_support::{member, shared_file};
 
     // --- escape_html ---
 

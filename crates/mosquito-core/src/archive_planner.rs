@@ -125,40 +125,8 @@ fn archive_name(files: &[SharedFile]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    use crate::file_store::FileId;
-    use crate::file_store::FolderProvenance;
-
-    /// A fake location that still splits on the platform's separators:
-    /// a literal `C:\nowhere\Photos` is one component on Linux (where
-    /// `\` is not a separator), so `file_name()` returned the whole
-    /// fabricated prefix and the archive layout tests failed there.
-    /// Nothing is ever created on disk — the planning is pure.
-    fn nowhere(name: &str) -> PathBuf {
-        std::env::temp_dir().join("mosquito-nowhere").join(name)
-    }
-
-    fn shared_file(id: u64, name: &str, provenance: Option<FolderProvenance>) -> SharedFile {
-        SharedFile {
-            id: FileId(id),
-            name: name.into(),
-            path: nowhere(name),
-            size: 1,
-            provenance,
-        }
-    }
-
-    fn member(id: u64, name: &str, root: &str, relative_path: &str) -> SharedFile {
-        shared_file(
-            id,
-            name,
-            Some(FolderProvenance {
-                folder_root: nowhere(root),
-                relative_path: relative_path.into(),
-            }),
-        )
-    }
+    use crate::test_support::{member, shared_file};
 
     // --- plan_archive: entry paths ---
 
