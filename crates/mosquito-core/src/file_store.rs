@@ -494,12 +494,7 @@ impl FileStore {
     /// The only failure is an unknown root id: materialization strokes
     /// per-entry problems as failures inside the outcome, not errors.
     pub fn materialize(&mut self, id: RootId) -> Result<MaterializeOutcome, RemoveError> {
-        let record = self
-            .roots
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| r.path.clone())
-            .ok_or(RemoveError::RootNotFound(id))?;
+        let record = self.node_root(id, "")?;
         Ok(self.materialize_at(&record, ""))
     }
 
@@ -521,19 +516,7 @@ impl FileStore {
         offset: usize,
         limit: usize,
     ) -> Result<NodePage, RemoveError> {
-        let record = self
-            .roots
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| PathBuf::from(r.path.clone()))
-            .ok_or(RemoveError::RootNotFound(id))?;
-
-        // The sub path decides whether a listing asks for content that
-        // lives at all inside the root record's subtree — anything
-        // else is a caller error, not a behavior.
-        if node_directory(&record, sub_path).is_none() {
-            return Err(RemoveError::SubPathEscapesRoot(sub_path.to_string()));
-        }
+        let record = self.node_root(id, sub_path)?;
 
         // The listing showing the folder IS the materialization
         // trigger: one scan registers direct children and hands back
@@ -580,6 +563,69 @@ impl FileStore {
             total,
             has_more,
         })
+    }
+
+    /// The root record behind a node address — an id plus the relative
+    /// sub path the node sits at — validated so the caller can address
+    /// the node's subtree itself ([`crate::archive_subtree`]). Unknown
+    /// ids and escaping sub paths are the caller errors
+    /// ([`RemoveError`]), answered with not-found by the HTTP layer.
+    pub(crate) fn node_root(&self, id: RootId, sub_path: &str) -> Result<PathBuf, RemoveError> {
+        let record = self
+            .roots
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.path.clone())
+            .ok_or(RemoveError::RootNotFound(id))?;
+
+        if node_directory(&record, sub_path).is_none() {
+            return Err(RemoveError::SubPathEscapesRoot(sub_path.to_string()));
+        }
+        Ok(record)
+    }
+
+    /// Every registered member under one node address, any depth down:
+    /// the node-keyed archive's selection. Members materialized *after*
+    /// this call are deliberately absent — the caller pays the walk
+    /// once, then plans from the collected snapshot (ADR-0005).
+    pub(crate) fn subtree_members(&self, root: &Path, sub_path: &str) -> Vec<SharedFile> {
+        let mut members: Vec<SharedFile> = self
+            .files
+            .iter()
+            .filter(|file| {
+                file.provenance.as_ref().is_some_and(|provenance| {
+                    provenance.folder_root == root
+                        && relative_in_subtree(&provenance.relative_path, sub_path)
+                })
+            })
+            .cloned()
+            .collect();
+
+        // Deterministic write order, independent of materialization
+        // history: member paths below the node, case-insensitively
+        // sorted — the same reading the listing pages sort rows with.
+        members.sort_by_cached_key(|file| {
+            file.provenance
+                .as_ref()
+                .map(|provenance| provenance.relative_path.to_lowercase())
+                .unwrap_or_default()
+        });
+        members
+    }
+}
+
+/// Whether `relative_path` names anything under `node_sub_path`, any
+/// depth down: the subtree filter the node-keyed archive selection
+/// uses. Files carry `relative_path`s only, so the node's own path
+/// never matches a member.
+pub(crate) fn relative_in_subtree(relative_path: &str, sub_path: &str) -> bool {
+    if sub_path.is_empty() {
+        true
+    } else {
+        match relative_path.strip_prefix(sub_path) {
+            Some(rest) => rest.starts_with('/'),
+            None => false,
+        }
     }
 }
 

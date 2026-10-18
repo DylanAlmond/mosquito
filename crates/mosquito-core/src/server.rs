@@ -18,8 +18,9 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 use crate::archive_planner::{ArchiveEntry, ArchivePlan, plan_archive};
+use crate::archive_subtree::collect_subtree;
 use crate::error::RemoveError;
-use crate::file_store::{FileId, FileStore, RootId};
+use crate::file_store::{FileId, FileStore, RootId, SharedFile};
 use crate::listing::{default_expansions, device_name, render_node_fragment, render_top_listing};
 use crate::listing_pages::LISTING_PAGE_ROWS;
 
@@ -47,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(listing))
         .route("/node/{root_id}", get(node_page))
         .route("/download/zip", get(download_zip))
+        .route("/download/zip/node/{root_id}", get(download_node_zip))
         .route("/download/{id}", get(download))
         .route("/assets/dynapuff-400.woff2", get(font_regular))
         .route("/assets/dynapuff-600.woff2", get(font_semibold))
@@ -235,6 +237,66 @@ async fn download_zip(
         }
     };
 
+    streamed_zip_response(&selected)
+}
+
+/// `GET /download/zip/node/{root_id}?sub=<path>` — the node-keyed zip
+/// route (ADR-0005): the addressed node's whole subtree, materialized
+/// through the store's idempotent key and streamed through the same
+/// planner and writer the id-keyed route uses. `sub` is absent for the
+/// root record's own node. Malformed or unknown node keys, and sub
+/// paths escaping the root record, answer not-found like any unknown
+/// address — the route never widens a caller's reach.
+///
+/// The walk runs on the blocking pool: whole-drive requests may take
+/// a long while, and no listing should stand behind them (each step
+/// takes the store lock for one directory scan at most, so the walk
+/// itself doesn't hold the UI back either — [`crate::archive_subtree`]).
+async fn download_node_zip(
+    State(state): State<AppState>,
+    Path(root_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // Hand-parsed, unlike the sibling node page's extracted `u64`: the
+    // ticket pins malformed node keys to not-found, and axum's failed
+    // extractor answers 400. `Path<String>` keeps that in the handler.
+    let Ok(root_id) = root_id.parse::<u64>().map(RootId) else {
+        return not_found();
+    };
+    let sub_path = query.get("sub").cloned().unwrap_or_default();
+
+    let selected = match tokio::task::spawn_blocking({
+        let store = Arc::clone(&state.store);
+        move || collect_subtree(&store, root_id, &sub_path)
+    })
+    .await
+    {
+        Ok(selected) => selected,
+        // The walk itself ran off the async reactor; a panic there is a
+        // server bug, reported like any other reading failure.
+        Err(join) => {
+            eprintln!("subtree walk failed: {join}");
+            return internal_error();
+        }
+    };
+
+    match selected {
+        Ok(selected) => streamed_zip_response(&selected),
+        Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => not_found(),
+        Err(err @ RemoveError::NotFound(_)) => {
+            unreachable!("collect_subtree never answers with a file id error: {err}")
+        }
+    }
+}
+
+/// The archive response both zip routes end in: vanished members are
+/// screened up front (a dangling member is visible as a failure, not
+/// a hole in a partial archive, per ADR-0001), the layout is planned
+/// — entry paths, collision suffixes, single-root archive naming —
+/// and the bytes stream out entry-by-entry, so multi-gigabyte
+/// selections never sit in memory: each member is read and
+/// compressed only when the client reaches it.
+fn streamed_zip_response(selected: &[SharedFile]) -> Response {
     // The archive can only succeed if every member is still readable:
     // a dangling member (content removed after the add) is a legit
     // state, but must be visible as a failure (ADR-0001) — a hole-free
@@ -248,7 +310,7 @@ async fn download_zip(
     if !all_present {
         return not_found();
     }
-    let ArchivePlan { name, entries } = plan_archive(&selected);
+    let ArchivePlan { name, entries } = plan_archive(selected);
 
     let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(8);
     tokio::task::spawn_blocking(move || {

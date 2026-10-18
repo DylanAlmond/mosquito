@@ -1,4 +1,5 @@
 mod archive_planner;
+mod archive_subtree;
 mod error;
 mod file_store;
 mod import_run;

@@ -61,6 +61,21 @@ fn entry_content(archive: &mut zip::ZipArchive<Cursor<Vec<u8>>>, name: &str) -> 
     content
 }
 
+/// A sync helper so a store assertion never holds the mutex across a
+/// test's awaits: the guard lives inside the non-async call only.
+fn assert_registered_members(state: &AppState, expected: usize, message: &str) {
+    let store = state.store().lock().expect("file store not poisoned");
+    assert_eq!(store.list().len(), expected, "{message}");
+}
+
+/// Zero or exactly-one assertions read in words, not raw counts: the
+/// store never registers one disk file twice.
+fn member_is_registered(state: &AppState, name: &str, expected: usize) {
+    let store = state.store().lock().expect("file store not poisoned");
+    let count = store.list().iter().filter(|file| file.name == name).count();
+    assert_eq!(count, expected, "{name}");
+}
+
 /// Deny read access to a directory, so unreadable-member behavior can
 /// be exercised over HTTP. Returns None where the environment won't
 /// cooperate, so the test can skip; access is restored on drop.
@@ -777,6 +792,168 @@ async fn zip_download_with_a_vanished_member_is_404() {
 
     // Visible as a failure, not an archive with a silent hole.
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn node_zip_archives_a_whole_lazy_root_without_prior_expansion() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state);
+
+    // Nothing was expanded or registered first: the request itself
+    // materializes the whole subtree (ADR-0005's archive trigger).
+    let response = get(app, "/download/zip/node/0").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/zip");
+    let disposition = response.headers()[CONTENT_DISPOSITION].to_str().unwrap();
+    assert!(
+        disposition.starts_with("attachment; filename=\"Photographs.zip\""),
+        "{disposition}"
+    );
+
+    // Every member under the node, at every depth, under the root
+    // name — the entry paths the existing planner derives.
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/beach.jpg", "Photographs/notes/todo.txt"]
+    );
+    assert_eq!(
+        entry_content(&mut archive, "Photographs/beach.jpg"),
+        "beach"
+    );
+    assert_eq!(
+        entry_content(&mut archive, "Photographs/notes/todo.txt"),
+        "todo"
+    );
+}
+
+#[tokio::test]
+async fn node_zip_of_a_nested_subfolder_scopes_to_that_node() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state);
+
+    // `sub` addresses the node: only what hangs below `notes`.
+    let response = get(app, "/download/zip/node/0?sub=notes").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    assert_eq!(entry_names(&mut archive), ["Photographs/notes/todo.txt"]);
+    assert_eq!(
+        entry_content(&mut archive, "Photographs/notes/todo.txt"),
+        "todo"
+    );
+}
+
+#[tokio::test]
+async fn node_zip_repeat_requests_never_duplicate_entries() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state.clone());
+
+    let first = parse_zip(get(app.clone(), "/download/zip/node/0").await).await;
+    let second = parse_zip(get(app, "/download/zip/node/0").await).await;
+
+    // Idempotent materialization: the same members on both, and no
+    // duplicated registrations the second time around.
+    let mut first = first;
+    let mut second = second;
+    assert_eq!(entry_names(&mut first), entry_names(&mut second));
+    member_is_registered(&state, "beach.jpg", 1);
+    member_is_registered(&state, "todo.txt", 1);
+    assert_registered_members(&state, 4, "nested materialization converged too");
+}
+
+#[tokio::test]
+async fn node_zip_covers_mixed_materialized_and_unmaterialized_content() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state.clone());
+
+    // Expand `notes` first: its direct children are now registered
+    // shared files with ids (a receiver browsed there earlier).
+    let _ = body_text(get(app.clone(), "/node/0?sub=notes").await).await;
+    assert_registered_members(&state, 3, "two loose plus the materialized todo.txt");
+
+    // The whole-root zip picks the materialized member and its
+    // unmaterialized siblings up as one subtree, with no duplicate.
+    let response = get(app, "/download/zip/node/0").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/beach.jpg", "Photographs/notes/todo.txt"]
+    );
+}
+
+#[tokio::test]
+async fn node_zip_answers_404_for_unknown_or_malformed_node_keys() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state);
+
+    for uri in [
+        "/download/zip/node/99",
+        "/download/zip/node/abc",
+        "/download/zip/node/",
+        "/download/zip/node/0?sub=..",
+        "/download/zip/node/0?sub=..%2F..",
+    ] {
+        let response = get(app.clone(), uri).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn node_zip_with_a_vanished_member_is_404_like_the_id_keyed_route() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("Photographs");
+    std::fs::create_dir_all(folder.join("notes")).unwrap();
+    std::fs::write(folder.join("beach.jpg"), b"beach").unwrap();
+    std::fs::write(folder.join("notes").join("todo.txt"), b"todo").unwrap();
+
+    let state = AppState::new(Arc::new(Mutex::new(FileStore::new())));
+    {
+        let mut store = state.store().lock().expect("file store not poisoned");
+        store.commit_root_record(&folder, 2);
+        // `notes` was browsed earlier: todo.txt registered, then its
+        // content vanished from disk (frozen snapshot keeps it listed).
+        let _ = store
+            .list_page(mosquito_core::RootId(0), "notes", 0, 10)
+            .unwrap();
+    }
+    std::fs::remove_file(folder.join("notes").join("todo.txt")).unwrap();
+
+    let app = router(state);
+
+    // Existing archive rules: a vanished member is visible as a
+    // failure up front — an archive with a silent hole is never sent.
+    let response = get(app, "/download/zip/node/0").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn node_zip_skips_unreadable_members_like_the_listing_does() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("Photographs");
+    std::fs::create_dir_all(folder.join("sealed").join("inner")).unwrap();
+    std::fs::write(folder.join("beach.jpg"), b"beach").unwrap();
+    std::fs::write(folder.join("sealed").join("inner").join("gone.txt"), b"g").unwrap();
+
+    let Some(_guard) = seal_directory(&folder.join("sealed")) else {
+        return; // the environment can't deny reads; skip
+    };
+
+    let mut store = FileStore::new();
+    store.commit_root_record(&folder, 2);
+
+    let app = router(AppState::new(Arc::new(Mutex::new(store))));
+
+    // Materialization failures are per-node markers on the listing,
+    // never blockers (ADR-0005): the sealed branch never registered,
+    // so the archive holds exactly what materialized and succeeds.
+    let response = get(app, "/download/zip/node/0").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut archive = parse_zip(response).await;
+    assert_eq!(entry_names(&mut archive), ["Photographs/beach.jpg"]);
 }
 
 #[tokio::test]
