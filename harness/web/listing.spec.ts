@@ -166,53 +166,169 @@ test('toggles folders through their chevrons, pruning their rows on collapse', a
   await page.screenshot({ path: shot('folder-toggles') });
 });
 
-test('selection covers only the rendered rows and no folder carries a checkbox', async ({
+test('folder checkboxes select node subtrees beside the rendered files', async ({
   page,
 }) => {
   const downloadSelected = page.locator('#download-selected');
+  const root = page.locator('.folder-row[data-folder-key="Photographs"]');
+  const rootBox = root.locator('button[data-node-select]');
+  const notes = page.locator('.folder-row[data-folder-key="Photographs/notes"]');
+  const notesBox = notes.locator('button[data-node-select]');
   await page.goto(FIXTURE_URL);
-  await expect(page.locator('.file-row[data-depth="1"]')).toContainText('beach.jpg');
+  await expect(page.locator('.file-row[data-depth="1"]')).toContainText(
+    'beach.jpg'
+  );
 
-  // No subtree payload anywhere (removed with the mirror, issue #25):
-  // folder rows carry a spacer column, never a checkbox.
+  // Every folder row carries its node checkbox (issue #27); only the
+  // failure marker keeps a spacer, and no file-id subtree payload
+  // exists anywhere (removed with the mirror, issue #25).
   await expect(page.locator('button[data-subtree]')).toHaveCount(0);
-  await expect(
-    page.locator('.folder-row button[role="checkbox"]')
-  ).toHaveCount(0);
-  await expect(
-    page.locator('.folder-row[data-folder-key="Photographs"] .checkbox-spacer')
-  ).toHaveCount(1);
+  await expect(page.locator('.folder-row button[data-node-select]')).toHaveCount(
+    2
+  );
+  await expect(page.locator('.folder-row .checkbox-spacer')).toHaveCount(0);
 
-  // Select-all covers exactly the ids rendered so far: 0–1 loose plus
-  // 2 (beach.jpg); the lazily-known todo.txt is not even a row yet.
-  await page.locator('#select-all').click();
-  await expect(page.locator('#select-all')).toHaveAttribute('aria-checked', 'true');
-  await expect(page.locator('.file-row.is-selected')).toHaveCount(3);
-  await expect(downloadSelected).toHaveClass(/is-visible/);
-  await expect(downloadSelected).toHaveAttribute('href', '/download/zip?ids=0,1,2');
+  // Checking the root selects the node (root record id + sub path) —
+  // no rendered member joins it, and a single-node selection links
+  // the node route directly.
+  await rootBox.click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(0);
+  await expect(page.locator('#select-all')).toHaveAttribute(
+    'aria-checked',
+    'mixed'
+  );
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip/node/0?sub='
+  );
 
-  // Expanding `notes` materializes its member (id 3): select-all is
-  // mixed until the new row joins the selection.
-  await expect(page.locator('.file-row.is-selected')).toHaveCount(3);
-  await page.locator('[aria-label="Expand notes"]').click();
-  await expect(page.locator('button[data-select="3"]')).toBeVisible();
-  await expect(page.locator('#select-all')).toHaveAttribute('aria-checked', 'mixed');
+  // Unchecking owns its subtree before anything else happened —
+  // nothing else to drop, the selection empties.
+  await rootBox.click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'false');
+  await expect(downloadSelected).not.toHaveClass(/is-visible/);
+  await expect(downloadSelected).toHaveAttribute('href', '/download/zip');
 
-  // The next click finishes the job: all four rendered rows.
-  await page.locator('#select-all').click();
-  await expect(page.locator('#select-all')).toHaveAttribute('aria-checked', 'true');
-  await expect(page.locator('.file-row.is-selected')).toHaveCount(4);
-  await expect(downloadSelected).toHaveAttribute('href', '/download/zip?ids=0,1,2,3');
-
-  // Partial selection through a single row's checkbox: the mixed state
-  // shows, and a one-file selection links that file directly.
-  await page.locator('button[data-select="3"]').click();
-  await expect(page.locator('#select-all')).toHaveAttribute('aria-checked', 'mixed');
-  await expect(downloadSelected).toHaveAttribute('href', '/download/zip?ids=0,1,2');
-
-  await page.locator('button[data-select="1"]').click();
-  await page.locator('button[data-select="0"]').click();
+  // A picked rendered member alone turns the node mixed — the
+  // member pick never checks the node (the rule runs both ways).
+  await page.locator('button[data-select="2"]').click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'mixed');
   await expect(downloadSelected).toHaveAttribute('href', '/download/2');
 
+  // Checking the node now merges both payload forms into one archive;
+  // the node's own selection wins its state, the member pick stays.
+  await rootBox.click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(1);
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?ids=2&nodes=0:'
+  );
+
+  // Unchecking the node drops its subtree: the member pick leaves too.
+  await rootBox.click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'false');
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(0);
+  await expect(downloadSelected).not.toHaveClass(/is-visible/);
+  await expect(downloadSelected).toHaveAttribute('href', '/download/zip');
+
+  // A nested subfolder selection is a node address too: a single-node
+  // selection links the node route, and the root row reads mixed.
+  await expect(notes).toBeVisible();
+  await notesBox.click();
+  await expect(notesBox).toHaveAttribute('aria-checked', 'true');
+  await expect(rootBox).toHaveAttribute('aria-checked', 'mixed');
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip/node/0?sub=notes'
+  );
+
+  // Checking the node again keeps the nested selection (node state
+  // wins over member participation), so both node addresses merge.
+  await rootBox.click();
+  await expect(rootBox).toHaveAttribute('aria-checked', 'true');
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?nodes=0:notes,0:'
+  );
+
+  // Unchecking the root drops the nested selection with its subtree.
+  await rootBox.click();
+  await expect(notesBox).toHaveAttribute('aria-checked', 'false');
+  await expect(downloadSelected).not.toHaveClass(/is-visible/);
+
+  // Select-all covers exactly the rendered file rows plus every
+  // root's node selection — one merged archive of the whole sweep.
+  await page.locator('#select-all').click();
+  await expect(page.locator('#select-all')).toHaveAttribute(
+    'aria-checked',
+    'true'
+  );
+  await expect(rootBox).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(3);
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?ids=0,1,2&nodes=0:'
+  );
+
+  // Unchecking empties everything it covered — node selections included.
+  await page.locator('#select-all').click();
+  await expect(page.locator('#select-all')).toHaveAttribute(
+    'aria-checked',
+    'false'
+  );
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(0);
+  await expect(downloadSelected).not.toHaveClass(/is-visible/);
+  await expect(downloadSelected).toHaveAttribute('href', '/download/zip');
+
   await page.screenshot({ path: shot('selections') });
+});
+
+test('folder selections survive collapses file-id picks prune away', async ({
+  page,
+}) => {
+  const downloadSelected = page.locator('#download-selected');
+  const notesBox = page.locator(
+    '.folder-row[data-folder-key="Photographs/notes"] button[data-node-select]'
+  );
+  await page.goto(FIXTURE_URL);
+  await expect(page.locator('.file-row[data-depth="1"]')).toContainText(
+    'beach.jpg'
+  );
+
+  // One loose pick and one node selection ride together.
+  await page.locator('button[data-select="1"]').click();
+  await page.locator('button[data-select="2"]').click();
+  await notesBox.click();
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?ids=1,2&nodes=0:notes'
+  );
+
+  // Collapsing the root prunes the file-id selections with their rows
+  // (the existing rule): the tree member's pick goes, the loose row's
+  // pick survives (its row still renders). The node address is
+  // semantic and survives regardless.
+  await page.locator('[aria-label="Collapse Photographs"]').click();
+  await expect(
+    page.locator('.folder-row[data-folder-key="Photographs/notes"]')
+  ).toHaveCount(0);
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?ids=1&nodes=0:notes'
+  );
+
+  // Re-expanding finds the same selection: the node checkbox comes
+  // back checked, the pruned member pick stays gone.
+  await page.locator('[aria-label="Expand Photographs"]').click();
+  await expect(notesBox).toBeVisible();
+  await expect(notesBox).toHaveAttribute('aria-checked', 'true');
+  await expect(downloadSelected).toHaveAttribute(
+    'href',
+    '/download/zip?ids=1&nodes=0:notes'
+  );
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(1);
+
+  await page.screenshot({ path: shot('surviving-selections') });
 });

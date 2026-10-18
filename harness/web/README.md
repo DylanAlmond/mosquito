@@ -16,12 +16,12 @@ harness_server`, loopback only) and runs `harness/web/listing.spec.ts`:
 | loose files first | `127.0.0.1:8473` | the top page's loose rows before any folder, JS-driven checkboxes |
 | fragment-loaded root | `127.0.0.1:8473` | one root row carrying its import-time count, its stamped expansion auto-fetching the fragment (`beach.jpg` at depth 1, `notes` collapsed), nested member **absent** until expanded, depth-shading and depth attributes |
 | chevron toggles | `127.0.0.1:8473` | chevron-only expand/collapse, region re-shading, row/name clicks are no-ops, collapse prunes rows (re-expand refetches) |
-| selection | `127.0.0.1:8473` | select-all covers exactly the rendered ids → zip link; partial selection → mixed select-all and single-file link; no folder checkbox anywhere |
+| selection | `127.0.0.1:8473` | folder rows carry node checkboxes (issue #27): a node pick links the node route alone or merges with file ids (`/download/zip?ids=…&nodes=…`); checked/mixed/unchecked per the desktop group rule; unchecking drops the subtree's member picks and nested node selections; select-all spans rendered files + every root's node selection; collapse prunes file-id picks but a folder selection survives |
 
 Screenshots land in a deterministic, gitignored directory —
 `test-artifacts/web-harness/` (`empty-list`, `loose-files`,
-`folder-groups`, `folder-toggles`, `selections` — same names every
-run).
+`folder-groups`, `folder-toggles`, `selections`,
+`surviving-selections` — same names every run).
 
 ## Stable selectors (the test contract)
 
@@ -50,16 +50,19 @@ markup, so the served page can change without harness breakage:
 | `[data-shade]` / `[data-shade="1"]` / `[data-shade="0"]` | the grey-region shade attribute, alternating per nesting level; `1` = shaded grey, `0` = plain surface |
 | `.materialize-marker` | a node's inline materialization-failure marker (ADR-0005): a count only, no failing paths |
 | `button[data-select="<id>"]` | a per-file checkbox (`aria-checked` `false`/`true`; hidden until the script runs) |
-| `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) — covers exactly the rows present, so an expansion makes it drop to `mixed` until re-clicked |
-| `#download-selected` / `#download-selected.is-visible` | icon-only download button, invisible until something is selected; `href` is `/download/<id>` for one file, `/download/zip?ids=<ids>` for several |
+| `button[data-node-select]` | a folder row's node checkbox (hidden until the script runs) — selects the node's whole subtree by address, never member file ids; aria state is `false`/`true`/`mixed`, mirroring the desktop root checkbox: checked only while the node itself is selected, mixed when some rendered member (picked file row or picked subfolder) participates |
+| `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) — covers exactly the rendered file rows plus every root's node selection, so an expansion makes it drop to `mixed` until re-clicked |
+| `#download-selected` / `#download-selected.is-visible` | icon-only download button, invisible until something is selected; `href` is `/download/<id>` for one file, `/download/zip/node/<id>?sub=<sub>` for one node, `/download/zip?ids=<ids>&nodes=<nodes>` for anything else — node addresses arrive as `nodes=<root_id>:<sub>,…` with the sub percent-encoded per address |
 
 Each fragment answers as one inert `<template data-node-key …
 data-offset data-window-rows data-total data-has-more>` wrapping flat
 `<li>` rows; the enhancement script swaps them into the flat list and
-advances the node's fetch cursor by the stamps. Selection resolves per
-individual file id (`data-select`); subtree selection from a folder
-row is gone with the tree mirror — node-level resolution arrives with
-the archive ticket.
+advances the node's fetch cursor by the stamps. File rows select by
+individual file id (`data-select`); folder rows select by node address
+(`data-node-root` + `data-node-sub`, issue #27) — checking a folder
+never materializes anything, a folder selection survives its row being
+collapsed by a parent, and a mixed selection (ids + node addresses)
+downloads as one merged archive.
 
 Rows a fragment's fetch adds render only when their ancestors are
 expanded (collapse **removes** them from the DOM); tests assert that
@@ -75,9 +78,10 @@ too:
   (ADR-0002), with the 16px-per-depth indent (name text, chevron, and
   member catch-up) mirroring too (ADR-0004).
 - Folder rows: the app's root rows carry a subtree checkbox and its
-  subfolder rows a spacer where the web keeps only the spacer —
-  selection resolves through the node there and, on the web, per file
-  row until the archive ticket's node-level resolution (ADR-0006).
+  subfolder rows a spacer, where the web gives **every** folder row
+  its node checkbox (issue #27) — selection resolves through the node
+  on both surfaces, the node-level payload form riding the archive
+  route (ADR-0006, ADR-0005's archive trigger).
 - Web row bodies are download links (per-file download works with
   JavaScript off), where app rows select on click; the web suite
   therefore always selects through checkboxes.

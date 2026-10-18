@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -204,26 +204,54 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found\n").into_response()
 }
 
-/// `GET /download/zip?ids=0,2` — the selected files as one streamed
-/// archive; no ids means everything currently shared. Bytes go out
-/// entry-by-entry, so multi-gigabyte selections never sit in memory:
-/// each member is read and compressed only when the client reaches it.
-async fn download_zip(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    let requested = match query.get("ids") {
+/// `GET /download/zip?ids=0,2&nodes=3:photos,3:photos/trip` — the
+/// selection as one streamed archive (issue #27): file ids from
+/// rendered rows and node addresses (root record id + relative sub
+/// path, empty sub for a whole root) may ride together; each node
+/// materializes through the same idempotent node-keyed walk the
+/// dedicated node route uses ([`collect_subtree`], ADR-0005). No
+/// params means everything currently shared; ids-only keeps the
+/// plain id-keyed form. Any malformed piece, unknown id, or
+/// unknown/escaping node address answers 404 like any unknown
+/// address.
+///
+/// Parameters are split *raw*, before percent-decoding: folder names
+/// may carry commas or slashes, which the client encodes as `%2C`/`%2F`
+/// — the non-ambiguous split must happen before any decode. Bytes go
+/// out entry-by-entry, so multi-gigabyte selections never sit in
+/// memory: each member is read and compressed only when the client
+/// reaches it.
+async fn download_zip(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
+    let query = raw.as_deref().unwrap_or("");
+
+    // Ids decode as a whole before splitting — matching the form the
+    // decoded-query extractor used to yield for this param. Malformed
+    // ids fail the whole request, exactly like before.
+    let requested = match raw_param(query, "ids") {
         None => None,
-        Some(raw) => match parse_ids(raw) {
-            Some(ids) => Some(ids),
+        Some(raw) => match percent_decode(raw) {
+            Some(decoded) => match parse_ids(&decoded) {
+                Some(ids) => Some(ids),
+                None => return not_found(),
+            },
+            None => return not_found(),
+        },
+    };
+    let nodes = match raw_param(query, "nodes") {
+        None => Vec::new(),
+        Some(raw) => match parse_nodes(raw) {
+            Some(nodes) => nodes,
             None => return not_found(),
         },
     };
 
-    let selected = {
+    // One brief lock to copy everything the ids select; node walks
+    // never hold it longer than one directory scan (ADR-0006).
+    let mut selected = {
         let store = state.store.lock().expect("file store not poisoned");
         match requested {
-            None => store.list().to_vec(),
+            None if nodes.is_empty() => store.list().to_vec(),
+            None => Vec::new(),
             Some(ids) => {
                 let mut selected = Vec::with_capacity(ids.len());
                 for id in ids {
@@ -236,6 +264,34 @@ async fn download_zip(
             }
         }
     };
+
+    for (root_id, sub_path) in nodes {
+        // The walk runs off the async reactor, one brief lock per
+        // step, like the dedicated node route ([`download_node_zip`]).
+        let walked = match tokio::task::spawn_blocking({
+            let state = state.clone();
+            move || collect_subtree(&state.store, RootId(root_id), &sub_path)
+        })
+        .await
+        {
+            Ok(walked) => walked,
+            // A panic inside the walk is a server bug, reported like
+            // any other reading failure.
+            Err(join) => {
+                eprintln!("subtree walk failed: {join}");
+                return internal_error();
+            }
+        };
+        match walked {
+            Ok(members) => selected.extend(members),
+            Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => {
+                return not_found()
+            }
+            Err(err @ RemoveError::NotFound(_)) => {
+                unreachable!("collect_subtree never answers with a file id error: {err}")
+            }
+        }
+    }
 
     streamed_zip_response(&selected)
 }
@@ -339,6 +395,56 @@ fn parse_ids(raw: &str) -> Option<Vec<u64>> {
     raw.split(',')
         .map(|part| part.trim().parse::<u64>().ok())
         .collect()
+}
+
+/// `nodes=3:photos,3:photos/trip` → [(3, "photos"), (3, "photos/trip")].
+/// The payload is parsed *before* any decoding: the colon never
+/// appears in the folder names the sub paths originate from (the
+/// request encoding keeps it out of the raw form), so each address
+/// splits unambiguously, and only its sub path percent-decodes — a
+/// comma or slash in a name arrives as `%2C`/`%2F` and never splits
+/// the payload. Any malformed piece (no sub, non-numeric root id,
+/// broken escape) makes the whole query invalid, answered with 404
+/// like an unknown id.
+fn parse_nodes(raw: &str) -> Option<Vec<(u64, String)>> {
+    raw.split(',')
+        .map(|piece| {
+            let (root_id, encoded_sub) = piece.split_once(':')?;
+            let root_id = root_id.trim().parse::<u64>().ok()?;
+            Some((root_id, percent_decode(encoded_sub)?))
+        })
+        .collect()
+}
+
+/// One raw (still percent-encoded) parameter value from a query
+/// string: the first `name=value` occurrence wins. The value comes
+/// back undecoded — [`parse_nodes`] must split before decoding.
+fn raw_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+/// Percent-decodes `%XX` pairs. `+` stays literal: clients encode the
+/// node payload with `encodeURIComponent` (spaces arrive as `%20`),
+/// so a plus sign in a folder name must survive. Malformed escapes or
+/// output that isn't UTF-8 decode to nothing.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Bridges the sync zip writer to the async response body: every write

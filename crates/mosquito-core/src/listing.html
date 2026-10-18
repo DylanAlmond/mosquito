@@ -273,10 +273,11 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* Receiver folder rows carry no checkbox of their own: selection
-         resolves through the node (ADR-0006) and node-level resolution
-         rides the archive ticket — the spacer keeps the grid's checkbox
-         column, and nothing in it ever appears. */
+      /* Folder rows all carry their node checkbox (issue #27): root
+         records and lazily-known subfolders alike — selection resolves
+         through the node (ADR-0006) and checking one never
+         materializes anything. Only the failure marker keeps the
+         spacer: a count row is never a selection target. */
       .checkbox-spacer {
         display: block;
       }
@@ -393,9 +394,15 @@
         // desktop paged feed's threshold (FileList.vue).
         var FETCH_AHEAD_PX = 120;
 
-        // Selection by registered file id (checkbox-targeted; folder
-        // rows carry no checkbox).
+        // Selection by registered file id plus node addresses
+        // (root record id + relative sub path, issue #27): file
+        // checkboxes target materialized rows; folder checkboxes
+        // select the node itself — never member file ids — and
+        // checking never materializes anything. Folder selections are
+        // semantic node addresses, so they survive their row
+        // collapsing away until unchecked.
         var selected = {};
+        var selectedNodes = {};
 
         // Expansion state and per-node page state, keyed by the folder
         // key the server stamps on every folder row and fragment (the
@@ -405,8 +412,17 @@
         var expanded = {};
         var pages = {};
 
-        function setBox(on, checkbox) {
-          checkbox.setAttribute('aria-checked', on ? 'true' : 'false');
+        // The desktop group rule's tri-state (FileList.vue): true,
+        // false, or 'mixed' — mixed lives in the aria state exactly
+        // like the desktop root checkboxes; visually only checked
+        // swaps to the checked icon.
+        function setBox(state, checkbox) {
+          var on = state === true || state === 'checked';
+          var mixed = state === 'mixed';
+          checkbox.setAttribute(
+            'aria-checked',
+            mixed ? 'mixed' : on ? 'true' : 'false'
+          );
           var checked = checkbox.querySelector('.icon-checked');
           var unchecked = checkbox.querySelector('.icon-unchecked');
           if (checked) checked.style.display = on ? '' : 'none';
@@ -415,56 +431,170 @@
           if (li) li.classList.toggle('is-selected', on);
         }
 
+        // A folder row's own address: the root record id plus the
+        // relative sub path — the semantic form the payload carries.
+        function nodeAddress(row) {
+          return row.dataset.nodeRoot + ':' + row.dataset.nodeSub;
+        }
+
+        // One folder checkbox's state (the desktop group rule, carried
+        // to subfolders, issue #27): checked when the node itself is
+        // selected, mixed when some rendered member participates — a
+        // picked file row, or a picked subfolder within — unchecked
+        // otherwise. Member picks and node picks never turn each other
+        // on; the state only ever mirrors the selection.
+        function folderState(row) {
+          if (selectedNodes[nodeAddress(row)]) return 'checked';
+          var depth = Number(row.dataset.depth);
+          var member = row.nextElementSibling;
+          while (
+            member &&
+            member.dataset.depth !== undefined &&
+            Number(member.dataset.depth) > depth
+          ) {
+            if (member.classList.contains('file-row')) {
+              var box = member.querySelector('[data-select]');
+              if (box && selected[box.dataset.select] === true) return 'mixed';
+            } else if (
+              Number(member.dataset.depth) === depth + 1 &&
+              folderState(member) !== 'unchecked'
+            ) {
+              return 'mixed';
+            }
+            member = member.nextElementSibling;
+          }
+          return 'unchecked';
+        }
+
+        // Unchecking a folder owns its subtree, like the desktop group
+        // checkbox always did: every rendered member file row's pick
+        // and every nested node selection's address leave with it.
+        function dropNodeSubtree(row) {
+          var rootId = row.dataset.nodeRoot;
+          var sub = row.dataset.nodeSub;
+          var prefix = sub === '' ? '' : sub + '/';
+          var depth = Number(row.dataset.depth);
+          var member = row.nextElementSibling;
+          while (
+            member &&
+            member.dataset.depth !== undefined &&
+            Number(member.dataset.depth) > depth
+          ) {
+            var box = member.querySelector('[data-select]');
+            if (box) delete selected[box.dataset.select];
+            member = member.nextElementSibling;
+          }
+          Object.keys(selectedNodes).forEach(function (address) {
+            var colon = address.indexOf(':');
+            if (address.slice(0, colon) !== rootId) return;
+            var otherSub = address.slice(colon + 1);
+            if (otherSub === sub || otherSub.indexOf(prefix) === 0) {
+              delete selectedNodes[address];
+            }
+          });
+        }
+
         function refresh() {
-          var boxes = Array.prototype.slice.call(
-            list.querySelectorAll('[data-select]')
-          );
           // Every revealed control stays a button with a state
           // attribute — the script just stops hiding what a plain HTML
-          // page has no use for: per-file checkboxes and chevrons that
-          // only exist once a fragment's rows arrive.
+          // page has no use for: per-file checkboxes, the folder rows'
+          // node checkboxes, and chevrons that only exist once a
+          // fragment's rows arrive.
           Array.prototype.forEach.call(
             list.querySelectorAll('[data-toggle]'),
             function (chevron) {
               chevron.hidden = false;
             }
           );
-          boxes.forEach(function (checkbox) {
-            checkbox.hidden = false;
-            setBox(selected[checkbox.dataset.select] === true, checkbox);
-          });
 
-          // A collapsed subtree prunes its rows: selections the list
-          // can no longer see leave the selection, and select-all
-          // covers exactly the rows that render — the desktop's rule.
-          var rendered = boxes.map(function (checkbox) {
-            return checkbox.dataset.select;
-          });
-          Object.keys(selected).forEach(function (id) {
-            if (rendered.indexOf(id) === -1) delete selected[id];
-          });
-
-          var ids = Object.keys(selected).filter(function (id) {
-            return selected[id];
-          });
-          var every = ids.length > 0 && ids.length === boxes.length;
-          setBox(every, selectAll);
-          selectAll.setAttribute(
-            'aria-checked',
-            ids.length === 0 ? 'false' : every ? 'true' : 'mixed'
+          var fileIds = [];
+          Array.prototype.forEach.call(
+            list.querySelectorAll('[data-select]'),
+            function (checkbox) {
+              checkbox.hidden = false;
+              setBox(selected[checkbox.dataset.select] === true, checkbox);
+              fileIds.push(checkbox.dataset.select);
+            }
           );
 
-          // The download button hides when nothing is selected; one
-          // file links directly, several becomes a zip of the selection.
-          if (ids.length === 0) {
+          // A collapsed subtree prunes its rows: file-id selections the
+          // list can no longer see leave the selection, and select-all
+          // covers exactly the rows that render — the desktop's rule.
+          // Folder selections are node addresses, so they survive the
+          // collapse until unchecked (issue #27).
+          Object.keys(selected).forEach(function (id) {
+            if (fileIds.indexOf(id) === -1) delete selected[id];
+          });
+
+          // The folder checkboxes state themselves from the selection,
+          // never from the last click.
+          Array.prototype.forEach.call(
+            list.querySelectorAll('[data-node-select]'),
+            function (checkbox) {
+              checkbox.hidden = false;
+              setBox(folderState(checkbox.closest('.folder-row')), checkbox);
+            }
+          );
+
+          // Select-all covers exactly the rendered file rows plus every
+          // root's node selection — the desktop's rule.
+          var rootAddresses = Array.prototype.map.call(
+            list.querySelectorAll('.folder-row[data-node-sub=""]'),
+            nodeAddress
+          );
+          var ids = Object.keys(selected);
+          var every =
+            fileIds.length + rootAddresses.length > 0 &&
+            fileIds.every(function (id) {
+              return selected[id] === true;
+            }) &&
+            rootAddresses.every(function (address) {
+              return selectedNodes[address] === true;
+            });
+          var some =
+            (ids.length > 0 || Object.keys(selectedNodes).length > 0) && !every;
+          setBox(every, selectAll);
+          selectAll.setAttribute('aria-checked', some ? 'mixed' : every ? 'true' : 'false');
+
+          // The download button hides when nothing is selected. One
+          // file links directly; one node selection may link its
+          // dedicated node route; anything else — file ids, node
+          // addresses, or both — becomes one merged zip (issue #27).
+          var addrs = Object.keys(selectedNodes);
+          if (ids.length === 0 && addrs.length === 0) {
             downloadButton.classList.remove('is-visible');
             downloadButton.href = '/download/zip';
-          } else if (ids.length === 1) {
+          } else if (ids.length === 1 && addrs.length === 0) {
             downloadButton.classList.add('is-visible');
             downloadButton.href = '/download/' + ids[0];
+          } else if (addrs.length === 1 && ids.length === 0) {
+            downloadButton.classList.add('is-visible');
+            var colon = addrs[0].indexOf(':');
+            downloadButton.href =
+              '/download/zip/node/' +
+              addrs[0].slice(0, colon) +
+              '?sub=' +
+              encodeURIComponent(addrs[0].slice(colon + 1));
           } else {
             downloadButton.classList.add('is-visible');
-            downloadButton.href = '/download/zip?ids=' + ids.join(',');
+            var parts = [];
+            if (ids.length > 0) parts.push('ids=' + ids.join(','));
+            if (addrs.length > 0) {
+              parts.push(
+                'nodes=' +
+                  addrs
+                    .map(function (address) {
+                      var colon = address.indexOf(':');
+                      return (
+                        address.slice(0, colon) +
+                        ':' +
+                        encodeURIComponent(address.slice(colon + 1))
+                      );
+                    })
+                    .join(',')
+              );
+            }
+            downloadButton.href = '/download/zip?' + parts.join('&');
           }
         }
 
@@ -694,12 +824,29 @@
 
         // One delegated click handler covers every row the page ever
         // shows — fragments arrive after load. A checkbox selects its
-        // row; only a folder row's own chevron toggles the row (the
-        // row's click is never a toggle), and a file's link downloads
-        // it with or without this script.
+        // row (a folder checkbox its node: checking never auto-checks
+        // members, unchecking drops the subtree's member picks and
+        // nested node selections — issue #27); only a folder row's own
+        // chevron toggles the row (the row's click is never a toggle),
+        // and a file's link downloads it with or without this script.
         list.addEventListener('click', function (event) {
           var target = event.target;
           if (!(target instanceof Element)) return;
+
+          var nodeBox = target.closest('[data-node-select]');
+          if (nodeBox && list.contains(nodeBox)) {
+            var row = nodeBox.closest('.folder-row');
+            if (row) {
+              var address = nodeAddress(row);
+              if (selectedNodes[address]) {
+                dropNodeSubtree(row);
+              } else {
+                selectedNodes[address] = true;
+              }
+            }
+            refresh();
+            return;
+          }
 
           var checkbox = target.closest('[data-select]');
           if (checkbox && list.contains(checkbox)) {
@@ -715,8 +862,8 @@
 
           var chevron = target.closest('[data-toggle]');
           if (chevron && list.contains(chevron)) {
-            var row = chevron.closest('.folder-row');
-            if (row) toggleFolder(row, chevron);
+            var folderRow = chevron.closest('.folder-row');
+            if (folderRow) toggleFolder(folderRow, chevron);
           }
         });
 
@@ -728,18 +875,39 @@
           var ids = boxes.map(function (checkbox) {
             return checkbox.dataset.select;
           });
-          // "every" after this click is when every rendered file is
-          // selected now — covered means checked, partially covered
+          // Roots are the folder rows stamped as whole records; their
+          // node selections ride exactly like the desktop group's.
+          var rootAddresses = Array.prototype.map.call(
+            list.querySelectorAll('.folder-row[data-node-sub=""]'),
+            nodeAddress
+          );
+          // "covered" after this click is when every rendered file row
+          // and every root's node selection is selected now — covered
+          // means the click empties the selection, partially covered
           // means the click finishes the job.
-          var every =
-            ids.length > 0 &&
+          var covered =
+            ids.length + rootAddresses.length > 0 &&
             ids.every(function (id) {
               return selected[id] === true;
+            }) &&
+            rootAddresses.every(function (address) {
+              return selectedNodes[address] === true;
             });
           ids.forEach(function (id) {
-            if (every) delete selected[id];
+            if (covered) delete selected[id];
             else selected[id] = true;
           });
+          rootAddresses.forEach(function (address) {
+            if (covered) delete selectedNodes[address];
+            else selectedNodes[address] = true;
+          });
+          if (covered) {
+            // A covered selection means nothing else rode along to
+            // keep: nested node selections leave with the sweep.
+            Object.keys(selectedNodes).forEach(function (address) {
+              delete selectedNodes[address];
+            });
+          }
           refresh();
         });
 

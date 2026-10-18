@@ -956,6 +956,163 @@ async fn node_zip_skips_unreadable_members_like_the_listing_does() {
     assert_eq!(entry_names(&mut archive), ["Photographs/beach.jpg"]);
 }
 
+/// Two folder roots plus one loose file, all untouched (lazily known):
+/// enough structure for multi-node, merged, and 404 payload tests.
+/// Root ids come from the commit order — Photographs is 0, Docs is 1.
+fn state_with_two_root_records() -> (TempDir, AppState) {
+    let dir = TempDir::new().unwrap();
+    let mut store = FileStore::new();
+
+    std::fs::write(dir.path().join("recipes.txt"), b"recipes").unwrap();
+    store.add(dir.path().join("recipes.txt")).unwrap();
+
+    let photographs = dir.path().join("Photographs");
+    std::fs::create_dir_all(photographs.join("notes")).unwrap();
+    std::fs::write(photographs.join("lead.txt"), b"lead").unwrap();
+    std::fs::write(photographs.join("notes").join("todo.txt"), b"todo").unwrap();
+    store.commit_root_record(&photographs, 2);
+
+    let docs = dir.path().join("Docs");
+    std::fs::create_dir_all(docs.join("drafts")).unwrap();
+    std::fs::write(docs.join("lead.txt"), b"lead").unwrap();
+    std::fs::write(docs.join("drafts").join("wip.txt"), b"wip").unwrap();
+    store.commit_root_record(&docs, 2);
+
+    (dir, AppState::new(Arc::new(Mutex::new(store))))
+}
+
+#[tokio::test]
+async fn zip_download_archives_each_node_address_of_the_payload() {
+    let (_dir, state) = state_with_two_root_records();
+    let app = router(state);
+
+    // Two lazily-known nodes across two roots: each materialized
+    // through the same idempotent node-keyed walk #26's route uses,
+    // nothing registered or expanded beforehand.
+    let response = get(app, "/download/zip?nodes=0:notes,1:drafts").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/zip");
+
+    let mut archive = parse_zip(response).await;
+    // Node addresses archive in payload order — the planner's layout
+    // preserves the selection's order (as the two-,roots test pins).
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/notes/todo.txt", "Docs/drafts/wip.txt"]
+    );
+}
+
+#[tokio::test]
+async fn zip_download_merges_ids_and_node_addresses_into_one_archive() {
+    let (_dir, state) = state_with_two_root_records();
+    let app = router(state);
+
+    // A rendered loose id plus a node address: one archive spans both
+    // forms, the id-keyed files resolving as always.
+    let response = get(app, "/download/zip?ids=0&nodes=0:notes").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    // Id files lead (as the payload orders them), then the node's.
+    // Layout preserves the selection's order.
+    assert_eq!(
+        entry_names(&mut archive),
+        ["recipes.txt", "Photographs/notes/todo.txt"]
+    );
+    assert_eq!(entry_content(&mut archive, "Photographs/notes/todo.txt"), "todo");
+    assert_eq!(entry_content(&mut archive, "recipes.txt"), "recipes");
+}
+
+#[tokio::test]
+async fn zip_download_of_a_root_node_address_uses_the_empty_sub() {
+    let (_dir, state) = state_with_two_root_records();
+    let app = router(state);
+
+    // A root's own node address (id 0): the form a single-node
+    // selection links directly. `notes` below it is never expanded —
+    // the walk covers the whole subtree.
+    let response = get(app, "/download/zip?nodes=0:").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let disposition = response.headers()[CONTENT_DISPOSITION].to_str().unwrap();
+    assert!(
+        disposition.starts_with("attachment; filename=\"Photographs.zip\""),
+        "{disposition}"
+    );
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/lead.txt", "Photographs/notes/todo.txt"]
+    );
+}
+
+#[tokio::test]
+async fn zip_download_with_unknown_or_malformed_node_addresses_is_404() {
+    let (_dir, state) = state_with_two_root_records();
+    let app = router(state);
+
+    // No address (`0` without its sub), an empty payload, a
+    // non-numeric root, an unknown root, and a sub escaping the root
+    // record — every malformed piece of the payload invalidates the
+    // whole request, the way the ids form answers.
+    for uri in [
+        "/download/zip?nodes=0",
+        "/download/zip?nodes=",
+        "/download/zip?nodes=abc:notes",
+        "/download/zip?nodes=99:notes",
+        "/download/zip?nodes=0:..",
+        "/download/zip?nodes=0:..%2F..",
+        "/download/zip?ids=0&nodes=99:notes",
+    ] {
+        let response = get(app.clone(), uri).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn zip_download_decodes_encoded_names_in_the_nodes_payload() {
+    let dir = TempDir::new().unwrap();
+    // A folder name carrying the payload's own delimiters: the comma
+    // splits addresses and the space is a form-encoding hazard — the
+    // request encoding (%XX, never `+` for spaces) must cover both.
+    let folder = dir.path().join("Photographs");
+    let named = folder.join("trip notes, 2024");
+    std::fs::create_dir_all(&named).unwrap();
+    std::fs::write(named.join("pool.jpg"), b"pool").unwrap();
+
+    let mut store = FileStore::new();
+    store.commit_root_record(&folder, 1);
+
+    let app = router(AppState::new(Arc::new(Mutex::new(store))));
+
+    // The raw payload splits on the encoded comma; the `%20`s decode
+    // per piece afterward, so the name arrives whole.
+    let response = get(app, "/download/zip?nodes=0:trip%20notes%2C%202024").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/trip notes, 2024/pool.jpg"]
+    );
+}
+
+#[tokio::test]
+async fn zip_download_node_selection_materializes_without_any_expansion() {
+    let (_dir, state) = state_with_two_root_records();
+    let app = router(state.clone());
+
+    let response = get(app, "/download/zip?nodes=0:notes").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The walk's materialization is the same idempotent trigger every
+    // node route carries: todo.txt registers once, the untouched
+    // branches never materialize.
+    member_is_registered(&state, "todo.txt", 1);
+    assert_registered_members(&state, 2, "one loose plus the notes member");
+}
+
 #[tokio::test]
 async fn download_unknown_id_is_404() {
     let (_dir, state) = state_with_file("hello.txt", b"hi");

@@ -14,9 +14,12 @@
 //!
 //! No absolute disk path and no pre-registration token reaches the
 //! markup: materialized rows carry file ids and download links;
-//! lazily-known rows are expandable rows without ids, never links.
-//! Rendering is pure string building — the only disk access is the
-//! budget rule's count-only scan, which registers nothing (display
+//! lazily-known rows are expandable rows without ids, never links, but
+//! every folder row carries its own node checkbox (issue #27) —
+//! selection resolves through the node (ADR-0006), checking never
+//! materializes anything, and node-level downloads ride the archive
+//! route. Rendering is pure string building — the only disk access is
+//! the budget rule's count-only scan, which registers nothing (display
 //! never adds content, issue #24).
 
 use std::path::Path;
@@ -287,12 +290,14 @@ fn expanded_shade(depth: usize) -> u8 {
 
 /// One root record's row: the tree's top, lazily-known and collapsed
 /// unless the five-children stamp says otherwise. The row never
-/// renders children (its page arrives on expansion), no checkbox
-/// subtree payload (selection resolves through the node, ADR-0006;
-/// node-level resolution rides the archive ticket — so lazily-known
-/// rows carry no member ids on the receiver page), and no absolute
-/// path or pre-registration token: the node's address for its
-/// fragment rides the root record id plus the (relative) sub path.
+/// renders children (its page arrives on expansion), and its
+/// checkbox selects the node itself — root record id plus sub path,
+/// never member file ids and never a subtree payload (selection
+/// resolves through the node, ADR-0006; the node-level payload form
+/// rides the archive route) — and checking never materializes
+/// anything. No absolute path or pre-registration token is embedded:
+/// the node's address for its fragment rides the root record id plus
+/// the (relative) sub path.
 fn root_row_html(root: &RootRow, expanded_default: bool) -> String {
     let key = escape_html(&root.key);
     let name = escape_html(&root.name);
@@ -306,12 +311,13 @@ fn root_row_html(root: &RootRow, expanded_default: bool) -> String {
     format!(
         "<li class=\"folder-row\" role=\"row\" data-depth=\"{depth}\" data-folder-key=\"{key}\" \
 data-node-root=\"{id}\" data-node-sub=\"\" data-shade=\"{shade}\" style=\"--depth:{depth}\">\
-<span class=\"checkbox-spacer\" aria-hidden=\"true\"></span>\
+{node_checkbox}\
 <button type=\"button\" class=\"folder-chevron{collapsed}\" aria-expanded=\"{expanded}\" \
 aria-label=\"{chevron_label} {name}\" data-toggle=\"{key}\" hidden>{chevron_svg}</button>\
 <span class=\"folder-name\">{name}</span>\
 <small class=\"folder-count\">{count}</small></li>",
         id = root.id,
+        node_checkbox = node_checkbox_html(&root.name),
         collapsed = if expanded_default {
             ""
         } else {
@@ -337,9 +343,12 @@ aria-label=\"{chevron_label} {name}\" data-toggle=\"{key}\" hidden>{chevron_svg}
 }
 
 /// One lazily-known subfolder row, as a node's fragment renders it:
-/// expandable only — no id, no link, no count, no checkbox payload.
-/// Its own node address rides the root record id plus its sub path
-/// for when the client fetches *its* page next.
+/// expandable only — no id, no link, no count, no member id payload.
+/// Like the root rows it now carries its own node checkbox (issue
+/// #27): checking selects this node (`data-node-root` +
+/// `data-node-sub`), never the members that only a later expansion
+/// would materialize. The address stamps also serve the next page
+/// fetch when the row expands.
 fn lazy_folder_row_html(
     name: &str,
     root_id: RootId,
@@ -355,13 +364,32 @@ fn lazy_folder_row_html(
         "<li class=\"folder-row\" role=\"row\" data-depth=\"{depth}\" data-folder-key=\"{key}\" \
 data-node-root=\"{root_id}\" data-node-sub=\"{sub_path}\" data-shade=\"{shade}\" \
 style=\"--depth:{depth}\">\
-<span class=\"checkbox-spacer\" aria-hidden=\"true\"></span>\
+{node_checkbox}\
 <button type=\"button\" class=\"folder-chevron is-collapsed\" aria-expanded=\"false\" \
 aria-label=\"Expand {name}\" data-toggle=\"{key}\" hidden>{chevron_svg}</button>\
 <span class=\"folder-name\">{name}</span></li>",
         root_id = root_id,
         sub_path = escape_html(sub_path),
+        node_checkbox = node_checkbox_html(&name),
         chevron_svg = CHEVRON_SVG,
+    )
+}
+
+/// The node checkbox a folder row carries (desktop group rule,
+/// `FileList.vue`): a state attribute the enhancement script drives
+/// — true when the node is selected, mixed when only some rendered
+/// members are picked, false otherwise — over the app's checkbox
+/// artwork. `data-node-select` is presence-only: the row's own
+/// `data-node-root`/`data-node-sub` stamps are the address.
+fn node_checkbox_html(name: &str) -> String {
+    format!(
+        "<button type=\"button\" role=\"checkbox\" aria-checked=\"false\" \
+aria-label=\"Select or deselect all files in {name}\" data-node-select=\"1\" hidden>\
+{unchecked_svg}{checked_svg}\
+</button>",
+        name = name,
+        unchecked_svg = UNCHECKED_BOX_SVG,
+        checked_svg = CHECKED_BOX_SVG,
     )
 }
 
@@ -567,8 +595,15 @@ mod tests {
         assert!(!html.contains("class=\"file-row\""));
         assert!(!html.contains("data-select="));
         // No subtree checkbox payload: selection resolves through the
-        // node, and its node-level form rides the archive ticket.
+        // node (ADR-0006), and the node-level form rides the archive
+        // route (issue #27).
         assert!(!html.contains("data-subtree"));
+        // The root row's own checkbox is a node selection — and never a
+        // file id one.
+        assert!(html.contains("data-node-select=\"1\""));
+        assert!(html.contains(
+            "aria-label=\"Select or deselect all files in Photographs\""
+        ));
         // The node address rides the record id, never a path.
         assert!(html.contains("data-node-root=\"3\" data-node-sub=\"\""));
     }
@@ -690,16 +725,19 @@ mod tests {
     fn listing_renders_desktop_style_selection_ui() {
         let top = TopListing {
             loose: vec![shared_file(0, "a.txt", None)],
-            roots: Vec::new(),
+            roots: vec![root_row(1, "Photos", "Photos", 1)],
         };
 
-        let html = render_top_listing(&top, &[], "test-device");
+        let html = render_top_listing(&top, &[false], "test-device");
 
         // Select-all checkbox in the header, per-file checkboxes in
         // rows, using the app's own square-rounded checkbox artwork.
         assert!(html.contains("aria-label=\"Select all shared files\""));
         assert!(html.contains("data-select=\"0\" hidden"));
         assert!(html.contains("icon-checked"));
+        // The folded root row carries its node checkbox (hidden until
+        // the script runs), mirroring the desktop root checkboxes.
+        assert!(html.contains("data-node-select=\"1\" hidden"));
         // The download button starts hidden: selection is empty and
         // the inline script only reveals it once something is selected.
         assert!(html.contains("id=\"download-selected\" class=\"download-selected\""));
@@ -712,8 +750,7 @@ mod tests {
         // JavaScript disabled.
         assert!(html.contains("href=\"/download/0\""));
         // The selection script never lists subtree member ids —
-        // lazily-known rows resolve selection through the node
-        // (node-level resolution rides the archive ticket).
+        // lazily-known rows resolve selection through the node.
         assert!(!html.contains("data-subtree"));
     }
 
@@ -892,12 +929,18 @@ mod tests {
             "data-folder-key=\"Photos/vacation\" data-node-root=\"7\" data-node-sub=\"vacation\""
         ));
         assert!(html.contains("aria-expanded=\"false\""));
-        // Lazily-known rows are expandable only: no ids, no links.
+        // Lazily-known rows are expandable only: no ids, no links —
+        // and their own checkbox is a node selection (issue #27),
+        // never a member file id one.
         let lazy_start = html.find("data-folder-key=\"Photos/vacation\"").unwrap();
         let lazy_end = lazy_start + html[lazy_start..].find("</li>").unwrap();
         let lazy = &html[lazy_start..lazy_end];
         assert!(!lazy.contains("href="));
         assert!(!lazy.contains("data-select"));
+        assert!(lazy.contains("data-node-select=\"1\""));
+        assert!(lazy.contains(
+            "aria-label=\"Select or deselect all files in vacation\""
+        ));
     }
 
     #[test]
