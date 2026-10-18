@@ -18,8 +18,10 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 use crate::archive_planner::{ArchiveEntry, ArchivePlan, plan_archive};
-use crate::file_store::{FileId, FileStore};
-use crate::listing::{device_name, render_listing};
+use crate::error::RemoveError;
+use crate::file_store::{FileId, FileStore, RootId};
+use crate::listing::{default_expansions, device_name, render_node_fragment, render_top_listing};
+use crate::listing_pages::LISTING_PAGE_ROWS;
 
 /// State shared by every handler. Cheap to clone (it's an Arc).
 #[derive(Clone)]
@@ -31,12 +33,19 @@ impl AppState {
     pub fn new(store: Arc<Mutex<FileStore>>) -> Self {
         Self { store }
     }
+
+    /// The shared store, for callers that must inspect or hold the
+    /// underlying store directly (harnesses, tests).
+    pub fn store(&self) -> &Arc<Mutex<FileStore>> {
+        &self.store
+    }
 }
 
 /// Build the app's routes. Tests and `main` both go through this.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(listing))
+        .route("/node/{root_id}", get(node_page))
         .route("/download/zip", get(download_zip))
         .route("/download/{id}", get(download))
         .route("/assets/dynapuff-400.woff2", get(font_regular))
@@ -46,16 +55,86 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn listing(State(state): State<AppState>) -> impl IntoResponse {
-    // The pattern used everywhere in this app: lock, copy what we need,
-    // drop the lock — never hold a std Mutex guard across an `.await`.
-    let files = {
+    // One brief lock to copy the whole derivation input: the top
+    // listing plus the root records (the budget rule needs their
+    // paths, which `RootRow` deliberately doesn't carry). The lock
+    // drops before any scan — a request never holds it across a
+    // listing-wide pass (ADR-0006).
+    let (top, records) = {
         let store = state.store.lock().expect("file store not poisoned");
-        store.list().to_vec()
+        (store.list_top(), store.roots().to_vec())
     };
+    debug_assert_eq!(
+        top.roots.len(),
+        records.len(),
+        "the top listing derives from the same root records"
+    );
 
-    let html = render_listing(&files, &device_name());
+    // The five-children stamps scan the disks' directories count-only,
+    // no lock held: displaying never registers content (issue #24).
+    let expansions = default_expansions(&records);
+
+    let html = render_top_listing(&top, &expansions, &device_name());
 
     ([(CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+/// `GET /node/{root_id}?sub=<path>&offset=<n>` — one node's page as an
+/// HTML fragment (ADR-0006): the request itself materializes the
+/// node's direct children (ADR-0005: the listing showing a folder is
+/// the trigger) and derives up to the page budget's rows, so repeat
+/// fetches never duplicate registrations. `limit` exists so tests and
+/// tooling can window the page; production fetches take the default.
+///
+/// The fragment wraps its rows in an inert `<template>` carrying the
+/// window's paging state. An unknown root id, or a sub path that
+/// escapes the root record, answers 404 like any unknown address —
+/// listing never widens a caller's reach.
+async fn node_page(
+    State(state): State<AppState>,
+    Path(root_id): Path<u64>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let sub_path = query.get("sub").cloned().unwrap_or_default();
+    let offset = query
+        .get("offset")
+        .and_then(|offset| offset.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = query
+        .get("limit")
+        .and_then(|limit| limit.parse::<usize>().ok())
+        .unwrap_or(LISTING_PAGE_ROWS)
+        .min(LISTING_PAGE_ROWS);
+
+    // One lock for one node's materialization and derivation plus the
+    // key lookup — the page-budget window's worth of work, and the
+    // lock goes down with the guard (no `.await` inside).
+    let response = {
+        let mut store = state.store.lock().expect("file store not poisoned");
+        match store.list_page(RootId(root_id), &sub_path, offset, limit) {
+            Ok(page) => {
+                // The fragment stamps the node's `list_top` key, so the
+                // page's rows key identically wherever they render.
+                let root_key = store
+                    .list_top()
+                    .roots
+                    .into_iter()
+                    .find(|root| root.id == RootId(root_id))
+                    .map(|root| root.key)
+                    .unwrap_or_default();
+                let html = render_node_fragment(&page, &root_key);
+                ([(CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+            }
+            Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => not_found(),
+            // `list_page` only errors per root-id/sub-path; the file-id
+            // error arm is unreachable here.
+            Err(err @ RemoveError::NotFound(_)) => {
+                unreachable!("list_page never answers with a file id error: {err}")
+            }
+        }
+    };
+
+    response
 }
 
 async fn font_regular() -> impl IntoResponse {

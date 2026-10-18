@@ -388,9 +388,8 @@ impl FileStore {
             lazy_subfolders: Vec::new(),
         };
 
-        let node = node_directory(root, sub_path).expect(
-            "materialize_at is called with an already-validated sub path",
-        );
+        let node = node_directory(root, sub_path)
+            .expect("materialize_at is called with an already-validated sub path");
 
         let entries = match std::fs::read_dir(&node) {
             Ok(entries) => entries,
@@ -550,12 +549,10 @@ impl FileStore {
             .files
             .iter()
             .filter(|file| {
-                file.provenance
-                    .as_ref()
-                    .is_some_and(|provenance| {
-                        provenance.folder_root == record
-                            && relative_in_node(&provenance.relative_path, sub_path)
-                    })
+                file.provenance.as_ref().is_some_and(|provenance| {
+                    provenance.folder_root == record
+                        && relative_in_node(&provenance.relative_path, sub_path)
+                })
             })
             .cloned()
             .collect();
@@ -594,7 +591,10 @@ fn relative_in_node(relative_path: &str, node_sub_path: &str) -> bool {
     if node_sub_path.is_empty() {
         !relative_path.contains('/')
     } else {
-        match relative_path.strip_prefix(node_sub_path).and_then(|rest| rest.strip_prefix('/')) {
+        match relative_path
+            .strip_prefix(node_sub_path)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
             Some(rest) => !rest.contains('/'),
             None => false,
         }

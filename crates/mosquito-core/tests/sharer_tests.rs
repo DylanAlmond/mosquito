@@ -223,7 +223,12 @@ async fn list_page_materializes_through_the_sharers_lock() {
     let run_id = outcome.run_id.expect("a folder import is a run");
     let _ = wait_terminated(&sharer, run_id).await;
 
-    let root_id = sharer.list_top().roots.first().expect("root record committed").id;
+    let root_id = sharer
+        .list_top()
+        .roots
+        .first()
+        .expect("root record committed")
+        .id;
 
     let page = sharer.list_page(root_id, "", 0, LISTING_PAGE_ROWS).unwrap();
 
@@ -237,10 +242,11 @@ async fn list_page_materializes_through_the_sharers_lock() {
         .collect();
     assert_eq!(names, ["a.txt"]);
     // Subfolders ride the scan as lazily-known rows.
-    assert!(page
-        .rows
-        .iter()
-        .any(|row| matches!(row, PageRow::LazyFolder { name } if name == "sub")));
+    assert!(
+        page.rows
+            .iter()
+            .any(|row| matches!(row, PageRow::LazyFolder { name } if name == "sub"))
+    );
 }
 
 #[test]

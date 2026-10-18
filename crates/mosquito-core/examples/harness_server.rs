@@ -72,16 +72,20 @@ async fn main() {
     }
     println!("harness fixtures in {}", dir.display());
 
+    // Seed the way an import does now (ADR-0006): two loose adds, then
+    // the folder group as a count-only root record — its members stay
+    // lazily-known and get ids 2 (beach.jpg) and 3 (todo.txt) only as
+    // the pages that show them materialize them.
     let mut seeded = FileStore::new();
-    let outcome = seeded.add_paths(vec![
-        dir.join("recipes.txt"),
-        dir.join("checklist.txt"),
-        dir.join("Photographs"),
-    ]);
-    if !outcome.failed.is_empty() {
-        eprintln!("harness: fixture adds failed: {outcome:?}");
-        std::process::exit(1);
-    }
+    seeded
+        .add(dir.join("recipes.txt"))
+        .map_err(|e| eprintln!("harness: fixture add failed: {e}"))
+        .unwrap_or_else(|_| std::process::exit(1));
+    seeded
+        .add(dir.join("checklist.txt"))
+        .map_err(|e| eprintln!("harness: fixture add failed: {e}"))
+        .unwrap_or_else(|_| std::process::exit(1));
+    seeded.commit_root_record(&dir.join("Photographs"), 2);
 
     println!("harness listing states:");
 
@@ -93,7 +97,6 @@ async fn main() {
     let fixtures = tokio::spawn(async move {
         serve(FIXTURE_PORT, seeded).await.expect("fixture server");
     });
-
     // Ctrl+C never reaches the spawned tasks directly; process exit is
     // the teardown for a throwaway harness.
     let _ = tokio::join!(empty, fixtures);

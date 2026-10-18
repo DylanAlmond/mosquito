@@ -1,7 +1,6 @@
 mod archive_planner;
 mod error;
 mod file_store;
-mod folder_tree;
 mod import_run;
 mod lan;
 mod listing;
@@ -18,7 +17,6 @@ pub use file_store::{
     AddFilesOutcome, FailedAdd, FileId, FileStore, FolderProvenance, MaterializeOutcome, RootId,
     RootRecord, RootRemoval, SharedFile,
 };
-pub use folder_tree::{FolderNode, FolderTree, build_folder_tree};
 pub use import_run::{ImportRunSnapshot, RootRun, RootRunStatus, RunId};
 pub use lan::{LanAddress, SystemLanAddress};
 pub use listing_pages::{LISTING_PAGE_ROWS, NodePage, PageRow, RootRow, TopListing};

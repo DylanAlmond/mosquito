@@ -13,10 +13,10 @@ harness_server`, loopback only) and runs `harness/web/listing.spec.ts`:
 | Test | Server | Asserts |
 | --- | --- | --- |
 | empty listing state | `127.0.0.1:8474` | empty-state text, no rows, no select-all |
-| loose files first | `127.0.0.1:8473` | loose rows before any folder, JS-driven checkboxes |
-| folder tree | `127.0.0.1:8473` | `Photographs` root expanded at depth 0, `notes` subfolder collapsed with its member hidden, depth-shading and depth attributes |
-| chevron toggles | `127.0.0.1:8473` | chevron-only expand/collapse, region re-shading, row/name clicks are no-ops |
-| subtree selection | `127.0.0.1:8473` | select-all → all highlighted + zip link; folder selection counts folded members → mixed on partial; batch-download link includes hidden ids |
+| loose files first | `127.0.0.1:8473` | the top page's loose rows before any folder, JS-driven checkboxes |
+| fragment-loaded root | `127.0.0.1:8473` | one root row carrying its import-time count, its stamped expansion auto-fetching the fragment (`beach.jpg` at depth 1, `notes` collapsed), nested member **absent** until expanded, depth-shading and depth attributes |
+| chevron toggles | `127.0.0.1:8473` | chevron-only expand/collapse, region re-shading, row/name clicks are no-ops, collapse prunes rows (re-expand refetches) |
+| selection | `127.0.0.1:8473` | select-all covers exactly the rendered ids → zip link; partial selection → mixed select-all and single-file link; no folder checkbox anywhere |
 
 Screenshots land in a deterministic, gitignored directory —
 `test-artifacts/web-harness/` (`empty-list`, `loose-files`,
@@ -25,13 +25,15 @@ run).
 
 ## Stable selectors (the test contract)
 
-The listing mirrors the desktop list's tree (ADR-0002) and — a
-deliberate mirror-by-duplicated-tokens, not shared code (ADR-0003) —
-its visual language too, so the web suite drives the same stable
-handles the desktop contract documents (`harness/desktop/README.md`).
-Specs target these selectors and the `data-*` attributes, never layout
-or generated markup, so the served page can change without harness
-breakage:
+The listing is server-rendered in fragments (ADR-0006): the initial
+page carries the top level only, and each expanded node's rows arrive
+from its own page through the enhancement script's fetches — same
+code path as the initial render. The visual language mirrors the
+desktop list's — a deliberate mirror-by-duplicated-tokens, not shared
+code (ADR-0003) — so the web suite drives the same stable handles the
+desktop contract documents (`harness/desktop/README.md`). Specs target
+these selectors and the `data-*` attributes, never layout or generated
+markup, so the served page can change without harness breakage:
 
 | Selector | Meaning |
 | --- | --- |
@@ -40,18 +42,29 @@ breakage:
 | `.file-row[data-depth="n"]` | a tree member's nesting depth (loose files carry none) |
 | `.folder-row` | an expandable folder row (root or subfolder) |
 | `.folder-row[data-folder-key="Photographs"]` / `.folder-row[data-folder-key="Photographs/notes"]` | a folder row by its tree key: the folder root's display name plus its subfolder path; the first root to carry a name keeps it bare, each later same-named root appends `-2`, `-3`, … Keys are appearance-ranked: they hold across re-renders and added roots, and only renumber when the first-appearance order of same-named roots changes (e.g. removing the earlier same-named root) |
+| `.folder-row[data-node-root="<id>"][data-node-sub="<sub>"]` | a folder row's node address for its fragment: the root record id plus the sub path relative to it — never an absolute filesystem path, and no pre-registration token (the root record id is stable, unlike the old mirror's path payload) |
 | `.folder-name` | a folder row's display name |
+| `.folder-count` | a root row's import-time file count (display only — showing it materializes nothing, issue #24) |
 | `[aria-label="Collapse <name>"]` / `[aria-label="Expand <name>"]` | the chevron only — the folder row, its name, and its body never toggle |
-| `[aria-expanded="true"]` / `[aria-expanded="false"]` | a folder's expansion state |
+| `[aria-expanded="true"]` / `[aria-expanded="false"]` | a folder's expansion state, seated by the server's five-children stamp and re-derived by the fragment's `aria-expanded` rows |
 | `[data-shade]` / `[data-shade="1"]` / `[data-shade="0"]` | the grey-region shade attribute, alternating per nesting level; `1` = shaded grey, `0` = plain surface |
+| `.materialize-marker` | a node's inline materialization-failure marker (ADR-0005): a count only, no failing paths |
 | `button[data-select="<id>"]` | a per-file checkbox (`aria-checked` `false`/`true`; hidden until the script runs) |
-| `button[data-subtree="<ids>"]` | a folder subtree checkbox listing every member id, folded members included (`aria-checked` `false`/`true`/`mixed`) |
-| `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) |
+| `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) — covers exactly the rows present, so an expansion makes it drop to `mixed` until re-clicked |
 | `#download-selected` / `#download-selected.is-visible` | icon-only download button, invisible until something is selected; `href` is `/download/<id>` for one file, `/download/zip?ids=<ids>` for several |
 
-Rows the default expansion keeps folded render with `hidden` (the
-enhancement script reveals them); tests assert that as visibility
-(`:visible`, `toBeHidden`) rather than the attribute itself.
+Each fragment answers as one inert `<template data-node-key …
+data-offset data-window-rows data-total data-has-more>` wrapping flat
+`<li>` rows; the enhancement script swaps them into the flat list and
+advances the node's fetch cursor by the stamps. Selection resolves per
+individual file id (`data-select`); subtree selection from a folder
+row is gone with the tree mirror — node-level resolution arrives with
+the archive ticket.
+
+Rows a fragment's fetch adds render only when their ancestors are
+expanded (collapse **removes** them from the DOM); tests assert that
+as presence (`toHaveCount`, `:visible`) rather than any hidden
+attribute.
 
 Same tree, same contract wording where the two UIs correspond — but
 the implementations really do differ in places, so the READMEs differ
@@ -61,10 +74,10 @@ too:
   a `shade-1` **class**; both mean the same alternating grey region
   (ADR-0002), with the 16px-per-depth indent (name text, chevron, and
   member catch-up) mirroring too (ADR-0004).
-- Folder-checkbox labels differ: the web says "Select all files in
-  `<name>`" where the app says "Select or deselect all files in
-  `<name>`" — the tests key on `[data-select]`/`[data-subtree]` and the
-  chevron labels above, not on those checkbox texts.
+- Folder rows: the app's root rows carry a subtree checkbox and its
+  subfolder rows a spacer where the web keeps only the spacer —
+  selection resolves through the node there and, on the web, per file
+  row until the archive ticket's node-level resolution (ADR-0006).
 - Web row bodies are download links (per-file download works with
   JavaScript off), where app rows select on click; the web suite
   therefore always selects through checkboxes.
@@ -98,8 +111,12 @@ yarn playwright test --config harness/web/playwright.config.ts
 
 ## What the fixture data looks like
 
-`recipes.txt` + `checklist.txt` loose, then the folder tree
-`Photographs` (expanded by default) with `beach.jpg` directly inside
-and the `notes` subfolder (collapsed by default) holding `todo.txt` —
-four files, ids 0–3, matching the zip-link ids asserted in the
-selection test.
+`recipes.txt` + `checklist.txt` loose, then the folder group
+`Photographs` seeded as a count-only root record (the import shape,
+ADR-0006): 2 direct children fits the five-children budget, so the
+root renders stamped-expanded and its fragment auto-fetches on load —
+`beach.jpg` directly inside (materialized as id 2 when the page that
+shows it fetches) and the `notes` subfolder (collapsed by default)
+holding `todo.txt` (id 3, materialized by its own node's page). The
+ids the selection test therefore sees: 0–1 loose, 2–3 shown through
+expansions.

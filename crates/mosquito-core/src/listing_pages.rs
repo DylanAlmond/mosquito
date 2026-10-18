@@ -1,7 +1,7 @@
 //! The store-side listing derivation (ADR-0006): the single place that
 //! turns the store's members and root records into listing rows. The
-//! desktop fetches pages of these rows through a Tauri command, and the
-//! receiver's fragment route will serve the identical derivation —
+//! desktop fetches pages of these rows through a Tauri command, and
+//! the receiver's fragment route serves the identical derivation —
 //! equal by construction, not by mirrored implementations.
 //!
 //! Two request shapes exist:
@@ -94,7 +94,8 @@ pub struct NodePage {
 /// The `impl` lives beside its module-own tests rather than inside
 /// `file_store.rs`, which stays about membership; this module is about
 /// presenting it.
-impl FileStore {    /// Derive the listing's top: loose files lead, then one row per
+impl FileStore {
+    /// Derive the listing's top: loose files lead, then one row per
     /// root record in import order. Pure — no disk I/O — so a
     /// root-record-only share displays with no additional registered
     /// cost (issue #24's first acceptance box).
@@ -279,7 +280,9 @@ mod tests {
         let mut store = FileStore::new();
         let record = store.commit_root_record(&root, 3);
 
-        let page = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
+        let page = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
 
         // Direct members only: the deeper `vacation/trip.jpg` stays
         // lazily known until `vacation` itself is listed.
@@ -331,8 +334,12 @@ mod tests {
         let mut store = FileStore::new();
         let record = store.commit_root_record(&root, 1);
 
-        let first = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
-        let second = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
+        let first = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
+        let second = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
 
         assert_eq!(store.list().len(), 1, "idempotent materialization");
         assert_eq!(
@@ -393,7 +400,6 @@ mod tests {
 
         let mut root_record = store_with_root(&root);
 
-
         // Root page: the direct file plus the lazily-known `vacation`.
         let top = root_record.list_page_record("", 0, LISTING_PAGE_ROWS);
         assert_eq!(names(&top.rows), ["beach.jpg", "vacation"]);
@@ -408,7 +414,10 @@ mod tests {
             PageRow::File { file } => file,
             other => panic!("expected a file row, got {other:?}"),
         };
-        assert_eq!(trip.provenance.as_ref().unwrap().relative_path, "vacation/trip.jpg");
+        assert_eq!(
+            trip.provenance.as_ref().unwrap().relative_path,
+            "vacation/trip.jpg"
+        );
     }
 
     #[test]
@@ -425,7 +434,9 @@ mod tests {
         let mut store = FileStore::new();
         let record = store.commit_root_record(&root, 1);
 
-        let page = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
+        let page = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
 
         // The readable sibling materializes; the sealed subfolder is a
         // lazily-known row… its listing (the next turn) is where its
@@ -435,7 +446,9 @@ mod tests {
 
         // Listing the sealed subfolder fails at the node level: an
         // inline failure on that node, the listing refuses nothing.
-        let sealed = store.list_page(record.id, "sealed", 0, LISTING_PAGE_ROWS).unwrap();
+        let sealed = store
+            .list_page(record.id, "sealed", 0, LISTING_PAGE_ROWS)
+            .unwrap();
         assert_eq!(sealed.rows.len(), 0);
         assert_eq!(sealed.failures.len(), 1);
         assert!(sealed.failures[0].path.ends_with("sealed"));
@@ -475,13 +488,17 @@ mod tests {
         let mut store = FileStore::new();
         let record = store.commit_root_record(&root, 1);
 
-        let first = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
+        let first = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
         assert_eq!(names(&first.rows), ["first.jpg"]);
 
         // The live-subtree contract: contents added on disk after the
         // import show up in a later page fetch.
         make_file(&root, "second.jpg", b"2");
-        let again = store.list_page(record.id, "", 0, LISTING_PAGE_ROWS).unwrap();
+        let again = store
+            .list_page(record.id, "", 0, LISTING_PAGE_ROWS)
+            .unwrap();
         assert_eq!(names(&again.rows), ["first.jpg", "second.jpg"]);
         assert_eq!(store.list().len(), 2);
     }
@@ -511,4 +528,3 @@ mod tests {
         }
     }
 }
-
