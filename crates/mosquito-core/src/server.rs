@@ -1,16 +1,25 @@
+use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tokio::fs::File;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
+use zip::CompressionMethod;
+use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
-use crate::file_store::{FileId, FileStore, SharedFile};
+use crate::archive_planner::{ArchiveEntry, ArchivePlan, plan_archive};
+use crate::file_store::{FileId, FileStore};
+use crate::listing::{device_name, render_listing};
 
 /// State shared by every handler. Cheap to clone (it's an Arc).
 #[derive(Clone)]
@@ -28,6 +37,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(listing))
+        .route("/download/zip", get(download_zip))
         .route("/download/{id}", get(download))
         .route("/assets/dynapuff-400.woff2", get(font_regular))
         .route("/assets/dynapuff-600.woff2", get(font_semibold))
@@ -113,6 +123,144 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found\n").into_response()
 }
 
+/// `GET /download/zip?ids=0,2` — the selected files as one streamed
+/// archive; no ids means everything currently shared. Bytes go out
+/// entry-by-entry, so multi-gigabyte selections never sit in memory:
+/// each member is read and compressed only when the client reaches it.
+async fn download_zip(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let requested = match query.get("ids") {
+        None => None,
+        Some(raw) => match parse_ids(raw) {
+            Some(ids) => Some(ids),
+            None => return not_found(),
+        },
+    };
+
+    let selected = {
+        let store = state.store.lock().expect("file store not poisoned");
+        match requested {
+            None => store.list().to_vec(),
+            Some(ids) => {
+                let mut selected = Vec::with_capacity(ids.len());
+                for id in ids {
+                    match store.get(FileId(id)) {
+                        Some(file) => selected.push(file.clone()),
+                        None => return not_found(),
+                    }
+                }
+                selected
+            }
+        }
+    };
+
+    // The archive can only succeed if every member is still readable:
+    // a dangling member (content removed after the add) is a legit
+    // state, but must be visible as a failure (ADR-0001) — a hole-free
+    // partial archive would hide the loss instead. Answering 404 here
+    // mirrors the single-file download's unreadable → 404.
+    let all_present = selected.iter().all(|file| {
+        std::fs::metadata(&file.path)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    });
+    if !all_present {
+        return not_found();
+    }
+    let ArchivePlan { name, entries } = plan_archive(&selected);
+
+    let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(8);
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = write_zip_archive(&entries, &tx) {
+            // Headers are already sent; surfacing the failure as a
+            // body error at least aborts the transfer instead of
+            // leaving the client with a silently truncated archive.
+            let _ = tx.blocking_send(Err(err));
+        }
+    });
+
+    let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
+
+    // No Content-Length — a streamed, compressed archive can't know its
+    // length up front, so the transfer stays chunked end-to-end.
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    headers.insert(CONTENT_DISPOSITION, content_disposition(&name));
+
+    response
+}
+
+/// `ids=0,2` → [0, 2]. Any malformed piece (empty, non-numeric) makes
+/// the whole query invalid, answered with 404 like an unknown id.
+fn parse_ids(raw: &str) -> Option<Vec<u64>> {
+    raw.split(',')
+        .map(|part| part.trim().parse::<u64>().ok())
+        .collect()
+}
+
+/// Bridges the sync zip writer to the async response body: every write
+/// is one chunk handed to the stream. The bounded channel is the
+/// backpressure — a slow reader throttles reads from disk.
+struct ChannelWriter {
+    tx: mpsc::Sender<io::Result<Vec<u8>>>,
+}
+
+impl io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Fails once the response is dropped (client disconnected);
+        // that error is what makes the zip writer stop.
+        self.tx
+            .blocking_send(Ok(buf.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "zip receiver dropped"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Stream one entry per selected file: open it, start the zip entry,
+/// copy the bytes. The zip crate's stream writer defers sizes into data
+/// descriptors, so nothing is seeked back over an already-flushed
+/// channel; the whole archive never lives in memory.
+///
+/// Members were pre-screened for readability, so an open failure here
+/// is a disk-level race between the check and this open. Aborting the
+/// stream (an io error the caller turns into a body error) keeps the
+/// loss visible instead of emitting a hole nobody can see.
+fn write_zip_archive(
+    entries: &[ArchiveEntry],
+    tx: &mpsc::Sender<io::Result<Vec<u8>>>,
+) -> io::Result<()> {
+    let mut zip = ZipWriter::new_stream(ChannelWriter { tx: tx.clone() });
+
+    // Zip64 so multi-gigabyte members don't corrupt the archive.
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true);
+
+    for entry in entries {
+        // Open before starting the zip entry: a failure then aborts
+        // without leaving a half-written entry behind.
+        let mut file = std::fs::File::open(&entry.file.path)?;
+
+        // Planning guarantees unique entry paths; the only errors left
+        // come from the channel, which map onto io like any other sink.
+        zip.start_file(&entry.entry_path, options)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        io::copy(&mut file, &mut zip)?;
+    }
+
+    // Writes the central directory: tiny, proportional to entry count.
+    zip.finish()
+        .map_err(|err| io::Error::other(err.to_string()))?;
+
+    Ok(())
+}
+
 fn internal_error() -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "could not read file\n").into_response()
 }
@@ -145,84 +293,6 @@ fn percent_encode(input: &str) -> String {
     out
 }
 
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;") // must be first, or we'd double-escape the rest
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// Human-readable size, 1024-based (Windows Explorer style).
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
-
-    let (value, unit) = if bytes >= TB {
-        (bytes as f64 / TB as f64, "TB")
-    } else if bytes >= GB {
-        (bytes as f64 / GB as f64, "GB")
-    } else if bytes >= MB {
-        (bytes as f64 / MB as f64, "MB")
-    } else if bytes >= KB {
-        (bytes as f64 / KB as f64, "KB")
-    } else {
-        return format!("{bytes} B");
-    };
-
-    format!("{value:.1} {unit}")
-}
-
-fn device_name() -> String {
-    ["COMPUTERNAME", "HOSTNAME"]
-        .into_iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|name| !name.trim().is_empty())
-        })
-        .unwrap_or_else(|| "Unknown device".to_string())
-}
-
-/// The page a phone sees after scanning the QR code.
-fn render_listing(files: &[SharedFile], device_name: &str) -> String {
-    let items: String = files
-        .iter()
-        .map(|f| {
-            format!(
-                "<li class=\"file-row\"><a href=\"/download/{id}\"><span>{name}</span><small>{size}</small></a></li>",
-                id = f.id.0,
-                name = escape_html(&f.name),
-                size = format_size(f.size),
-            )
-        })
-        .collect();
-
-    let (file_count, file_content) = if files.is_empty() {
-        (
-            "Shared files".to_string(),
-            "<p class=\"empty-state\">Nothing is being shared right now.</p>".to_string(),
-        )
-    } else {
-        (
-            format!(
-                "{} file{} available",
-                files.len(),
-                if files.len() == 1 { "" } else { "s" }
-            ),
-            format!("<ul class=\"file-list\">{items}</ul>"),
-        )
-    };
-
-    include_str!("listing.html")
-        .replace("{{FILE_COUNT}}", &file_count)
-        .replace("{{DEVICE_NAME}}", &escape_html(device_name))
-        .replace("{{FILE_CONTENT}}", &file_content)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,79 +316,5 @@ mod tests {
     fn percent_encode_encodes_utf8_as_bytes() {
         // 'é' is two bytes (C3 A9) in UTF-8
         assert_eq!(percent_encode("café.txt"), "caf%C3%A9.txt");
-    }
-
-    // --- escape_html ---
-
-    #[test]
-    fn escape_html_escapes_all_specials() {
-        assert_eq!(escape_html(r#"&<>"'"#), "&amp;&lt;&gt;&quot;&#39;");
-    }
-
-    #[test]
-    fn escape_html_ampersand_first_never_double_escapes() {
-        assert_eq!(escape_html("&lt;"), "&amp;lt;");
-    }
-
-    // --- format_size ---
-
-    #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(999), "999 B");
-    }
-
-    #[test]
-    fn format_size_kilobytes() {
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-    }
-
-    #[test]
-    fn format_size_megabytes_and_gigabytes() {
-        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GB");
-    }
-
-    // --- render_listing ---
-
-    #[test]
-    fn listing_shows_empty_message_without_links() {
-        let html = render_listing(&[], "test-device");
-
-        assert!(html.contains("Nothing is being shared"));
-        assert!(!html.contains("<li>"));
-        assert!(html.contains("Shared from test-device"));
-        assert!(html.contains("https://github.com/DylanAlmond/mosquito"));
-        assert!(!html.contains("{{"));
-    }
-
-    #[test]
-    fn listing_escapes_names_and_links_ids() {
-        let files = vec![SharedFile {
-            id: FileId(0),
-            name: "<script>.txt".into(),
-            path: "unused".into(),
-            size: 42,
-        }];
-
-        let html = render_listing(&files, "test-device");
-
-        assert!(html.contains("&lt;script&gt;.txt"));
-        assert!(html.contains("href=\"/download/0\""));
-        assert!(html.contains("42 B"));
-        assert!(!html.contains("<script>"));
-        assert!(
-            html.find("class=\"file-count\"").unwrap() < html.find("class=\"file-list\"").unwrap()
-        );
-        assert!(html.contains("overflow-y: auto"));
-    }
-
-    #[test]
-    fn listing_escapes_the_device_name() {
-        let html = render_listing(&[], "<script>host</script>");
-
-        assert!(html.contains("Shared from &lt;script&gt;host&lt;/script&gt;"));
-        assert!(!html.contains("<script>host</script>"));
     }
 }
