@@ -13,15 +13,17 @@ A tiny desktop app for sharing files between devices on the same local network.
 
 ## How it works
 
-1. Drag one or more files into the window
+1. Drag one or more files or folders into the window
 2. Mosquito starts a temporary HTTP server on your LAN
 3. A URL and QR code appear
 4. Another device scans the code and downloads the files
 5. **Stop Sharing**, removing the last file, or closing the app shuts the server down
 
-On Windows, right-click one or more files in File Explorer and choose
-**Share with Mosquito**. The per-user context-menu option is registered when
-Mosquito is first opened and launches the app with each selected file.
+On Windows, right-click files, folders, or a mix of both in File Explorer
+and choose **Share with Mosquito**. The per-user context-menu option is
+registered when Mosquito is first opened and launches the app once with
+every selected item, so a folder is shared as a snapshot of its regular
+files.
 
 ## Tech stack
 

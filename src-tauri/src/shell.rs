@@ -4,9 +4,11 @@
 //! The values the app publishes to the registry live in the
 //! [`registration`] submodule, compiled wherever tests can reach them so
 //! debug builds can pin them (issue #18): the tests below pin the
-//! currently-published values — legacy `*`-class key, `Document`
-//! multi-select model — so ticket #19, which changes the registered key,
-//! can flip the pins and prove what changed.
+//! published values — the `AllFilesystemObjects` class key (files,
+//! folders, and mixed selections all resolve the verb) and the `Player`
+//! multi-select model — plus the legacy `*`-class key path, which the
+//! glue removes on every run so existing installs don't keep both verbs
+//! (issue #19).
 //!
 //! The only release-gated part is the thin `register_context_menu` glue,
 //! which writes those values with `winreg`. It stays
@@ -22,10 +24,18 @@ pub mod registration {
 
     /// Registry path of the verb key, relative to `HKEY_CURRENT_USER`.
     ///
-    /// Still the legacy `*` (any file type) class key. Pinned by the
-    /// tests below; #19 moves the verb to a narrower class key and flips
-    /// this pin.
-    pub const VERB_KEY_PATH: &str = r"Software\Classes\*\shell\Mosquito.Share";
+    /// The `AllFilesystemObjects` class key: file and folder verbs both
+    /// resolve here, and Explorer's menu resolution reports the entry for
+    /// files, folders, and mixed selections.
+    pub const VERB_KEY_PATH: &str = r"Software\Classes\AllFilesystemObjects\shell\Mosquito.Share";
+
+    /// Registry path of the old files-only verb key, relative to
+    /// `HKEY_CURRENT_USER`.
+    ///
+    /// Registration deletes this on every run: it existed before #19, so
+    /// installs that registered under it must never end up with duplicate
+    /// verbs. Idempotent by design — no migration state.
+    pub const LEGACY_VERB_KEY_PATH: &str = r"Software\Classes\*\shell\Mosquito.Share";
 
     /// Name of the subkey of the verb key that holds the invocation.
     pub const COMMAND_SUBKEY: &str = "command";
@@ -34,10 +44,16 @@ pub mod registration {
     pub const VERB_NAME: &str = "Share with Mosquito";
 
     /// How the menu entry reports multi-file selection to Explorer.
-    pub const MULTI_SELECT_MODEL: &str = "Document";
+    ///
+    /// `Player` makes Explorer launch the app exactly once per selection,
+    /// passing every selected item as an argument — the only mode that
+    /// reaches the sharing app with folders counted too.
+    pub const MULTI_SELECT_MODEL: &str = "Player";
 
-    /// The command subkey's default value: launch this app passing the
-    /// first selected file to `--share`.
+    /// The command subkey's default value: launch this app with a
+    /// `--share` invocation. With the Player multi-select model, Explorer
+    /// runs this once per selection and appends every selected item as
+    /// separate arguments after the `%1` first item.
     pub fn command_line(exe_path: &Path) -> String {
         format!("\"{}\" --share \"%1\"", exe_path.display())
     }
@@ -47,8 +63,16 @@ pub mod registration {
         use super::*;
 
         #[test]
-        fn verb_key_path_pins_the_legacy_star_class_key() {
-            assert_eq!(VERB_KEY_PATH, r"Software\Classes\*\shell\Mosquito.Share");
+        fn verb_key_path_pins_the_allfilesystemobjects_class_key() {
+            assert_eq!(
+                VERB_KEY_PATH,
+                r"Software\Classes\AllFilesystemObjects\shell\Mosquito.Share"
+            );
+        }
+
+        #[test]
+        fn legacy_verb_key_path_pins_the_star_class_key_being_removed() {
+            assert_eq!(LEGACY_VERB_KEY_PATH, r"Software\Classes\*\shell\Mosquito.Share");
         }
 
         #[test]
@@ -62,8 +86,8 @@ pub mod registration {
         }
 
         #[test]
-        fn multi_select_model_pins_the_document_model() {
-            assert_eq!(MULTI_SELECT_MODEL, "Document");
+        fn multi_select_model_pins_the_player_model() {
+            assert_eq!(MULTI_SELECT_MODEL, "Player");
         }
 
         #[test]
@@ -82,8 +106,16 @@ pub fn register_context_menu() -> io::Result<()> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
-    let exe = std::env::current_exe()?;
     let classes = RegKey::predef(HKEY_CURRENT_USER);
+    // Idempotent legacy cleanup (issue #19) — the const's doc explains
+    // why. Deleting an already-absent key is not an error.
+    match classes.delete_subkey_all(registration::LEGACY_VERB_KEY_PATH) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let exe = std::env::current_exe()?;
     let (verb, _) = classes.create_subkey(registration::VERB_KEY_PATH)?;
 
     verb.set_value("MUIVerb", &registration::VERB_NAME)?;
