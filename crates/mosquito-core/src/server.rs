@@ -268,32 +268,56 @@ async fn download_zip(State(state): State<AppState>, RawQuery(raw): RawQuery) ->
     for (root_id, sub_path) in nodes {
         // The walk runs off the async reactor, one brief lock per
         // step, like the dedicated node route ([`download_node_zip`]).
-        let walked = match tokio::task::spawn_blocking({
-            let state = state.clone();
-            move || collect_subtree(&state.store, RootId(root_id), &sub_path)
-        })
-        .await
-        {
-            Ok(walked) => walked,
-            // A panic inside the walk is a server bug, reported like
-            // any other reading failure.
-            Err(join) => {
-                eprintln!("subtree walk failed: {join}");
-                return internal_error();
-            }
+        let members = match walked_node_members(&state, RootId(root_id), sub_path).await {
+            Ok(members) => members,
+            Err(response) => return response,
         };
-        match walked {
-            Ok(members) => selected.extend(members),
-            Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => {
-                return not_found()
-            }
-            Err(err @ RemoveError::NotFound(_)) => {
-                unreachable!("collect_subtree never answers with a file id error: {err}")
-            }
-        }
+        selected.extend(members);
     }
 
+    // The selection is one set of members: the same registration can
+    // arrive through a node address and its own id (a picked member
+    // picked again under its checked folder), or through two
+    // overlapping node addresses. Dedupe by id — the idempotent node
+    // walk keys registrations per real file — so no member lands in
+    // the archive twice. Distinct ids for the same bytes are not the
+    // same member: they keep their collision suffixes (ADR-0001).
+    let mut seen = std::collections::HashSet::new();
+    selected.retain(|file| seen.insert(file.id));
+
     streamed_zip_response(&selected)
+}
+
+/// One node-keyed walk off the async reactor — the blocking half that
+/// [`download_zip`] and [`download_node_zip`] share: materialize the
+/// node's whole subtree through the store's idempotent node key
+/// ([`collect_subtree`], ADR-0005). Unknown or escaping addresses map
+/// to the not-found response every route contracts to; a panic inside
+/// the walk is a server bug, reported like any other reading failure.
+async fn walked_node_members(
+    state: &AppState,
+    root_id: RootId,
+    sub_path: String,
+) -> Result<Vec<SharedFile>, Response> {
+    let walked = match tokio::task::spawn_blocking({
+        let state = state.clone();
+        move || collect_subtree(&state.store, root_id, &sub_path)
+    })
+    .await
+    {
+        Ok(walked) => walked,
+        Err(join) => {
+            eprintln!("subtree walk failed: {join}");
+            return Err(internal_error());
+        }
+    };
+    match walked {
+        Ok(members) => Ok(members),
+        Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => Err(not_found()),
+        Err(err @ RemoveError::NotFound(_)) => {
+            unreachable!("collect_subtree never answers with a file id error: {err}")
+        }
+    }
 }
 
 /// `GET /download/zip/node/{root_id}?sub=<path>` — the node-keyed zip
@@ -321,28 +345,12 @@ async fn download_node_zip(
     };
     let sub_path = query.get("sub").cloned().unwrap_or_default();
 
-    let selected = match tokio::task::spawn_blocking({
-        let store = Arc::clone(&state.store);
-        move || collect_subtree(&store, root_id, &sub_path)
-    })
-    .await
-    {
+    let selected = match walked_node_members(&state, root_id, sub_path).await {
         Ok(selected) => selected,
-        // The walk itself ran off the async reactor; a panic there is a
-        // server bug, reported like any other reading failure.
-        Err(join) => {
-            eprintln!("subtree walk failed: {join}");
-            return internal_error();
-        }
+        Err(response) => return response,
     };
 
-    match selected {
-        Ok(selected) => streamed_zip_response(&selected),
-        Err(RemoveError::RootNotFound(_) | RemoveError::SubPathEscapesRoot(_)) => not_found(),
-        Err(err @ RemoveError::NotFound(_)) => {
-            unreachable!("collect_subtree never answers with a file id error: {err}")
-        }
-    }
+    streamed_zip_response(&selected)
 }
 
 /// The archive response both zip routes end in: vanished members are

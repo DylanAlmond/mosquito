@@ -996,7 +996,7 @@ async fn zip_download_archives_each_node_address_of_the_payload() {
 
     let mut archive = parse_zip(response).await;
     // Node addresses archive in payload order — the planner's layout
-    // preserves the selection's order (as the two-,roots test pins).
+    // preserves the selection's order (as the two-roots test pins).
     assert_eq!(
         entry_names(&mut archive),
         ["Photographs/notes/todo.txt", "Docs/drafts/wip.txt"]
@@ -1111,6 +1111,45 @@ async fn zip_download_node_selection_materializes_without_any_expansion() {
     // branches never materialize.
     member_is_registered(&state, "todo.txt", 1);
     assert_registered_members(&state, 2, "one loose plus the notes member");
+}
+
+#[tokio::test]
+async fn zip_download_dedupes_a_member_picked_along_its_checked_node() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state.clone());
+
+    // Browse once: beach.jpg materializes with id 2 (loose ids 0–1).
+    let _ = body_text(get(app.clone(), "/node/0").await).await;
+
+    // The member picked along with the folder node that holds it: one
+    // archive, one entry per member — the merged payload never
+    // duplicates bytes.
+    let response = get(app, "/download/zip?ids=2&nodes=0:").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/beach.jpg", "Photographs/notes/todo.txt"]
+    );
+}
+
+#[tokio::test]
+async fn zip_download_dedupes_overlapping_node_addresses_of_one_payload() {
+    let (_dir, state) = state_with_root_record();
+    let app = router(state);
+
+    // A root node and a nested node of its own subtree in one payload:
+    // the nested walk re-returns what the root walk already sent —
+    // the archive holds every member exactly once.
+    let response = get(app, "/download/zip?nodes=0:,0:notes").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive = parse_zip(response).await;
+    assert_eq!(
+        entry_names(&mut archive),
+        ["Photographs/beach.jpg", "Photographs/notes/todo.txt"]
+    );
 }
 
 #[tokio::test]

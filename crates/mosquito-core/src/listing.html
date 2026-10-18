@@ -438,13 +438,13 @@
         }
 
         // One folder checkbox's state (the desktop group rule, carried
-        // to subfolders, issue #27): checked when the node itself is
+        // to subfolders, issue #27): true when the node itself is
         // selected, mixed when some rendered member participates — a
-        // picked file row, or a picked subfolder within — unchecked
+        // picked file row, or a picked subfolder within — false
         // otherwise. Member picks and node picks never turn each other
         // on; the state only ever mirrors the selection.
         function folderState(row) {
-          if (selectedNodes[nodeAddress(row)]) return 'checked';
+          if (selectedNodes[nodeAddress(row)]) return true;
           var depth = Number(row.dataset.depth);
           var member = row.nextElementSibling;
           while (
@@ -457,13 +457,38 @@
               if (box && selected[box.dataset.select] === true) return 'mixed';
             } else if (
               Number(member.dataset.depth) === depth + 1 &&
-              folderState(member) !== 'unchecked'
+              folderState(member) !== false
             ) {
               return 'mixed';
             }
             member = member.nextElementSibling;
           }
-          return 'unchecked';
+          return false;
+        }
+
+        // The folder rows stamped as whole records — the roots whose
+        // node selections ride select-all's scope (the desktop group's
+        // rule, rendered rows plus every root).
+        function rootAddresses() {
+          return Array.prototype.map.call(
+            list.querySelectorAll('.folder-row[data-node-sub=""]'),
+            nodeAddress
+          );
+        }
+
+        // Whether the selection covers that whole scope: every
+        // rendered file row plus every root's node selection —
+        // select-all's "covered" state, computed before its click.
+        function selectionCovers(ids, addresses) {
+          return (
+            ids.length + addresses.length > 0 &&
+            ids.every(function (id) {
+              return selected[id] === true;
+            }) &&
+            addresses.every(function (address) {
+              return selectedNodes[address] === true;
+            })
+          );
         }
 
         // Unchecking a folder owns its subtree, like the desktop group
@@ -538,19 +563,8 @@
 
           // Select-all covers exactly the rendered file rows plus every
           // root's node selection — the desktop's rule.
-          var rootAddresses = Array.prototype.map.call(
-            list.querySelectorAll('.folder-row[data-node-sub=""]'),
-            nodeAddress
-          );
           var ids = Object.keys(selected);
-          var every =
-            fileIds.length + rootAddresses.length > 0 &&
-            fileIds.every(function (id) {
-              return selected[id] === true;
-            }) &&
-            rootAddresses.every(function (address) {
-              return selectedNodes[address] === true;
-            });
+          var every = selectionCovers(fileIds, rootAddresses());
           var some =
             (ids.length > 0 || Object.keys(selectedNodes).length > 0) && !every;
           setBox(every, selectAll);
@@ -877,35 +891,25 @@
           });
           // Roots are the folder rows stamped as whole records; their
           // node selections ride exactly like the desktop group's.
-          var rootAddresses = Array.prototype.map.call(
-            list.querySelectorAll('.folder-row[data-node-sub=""]'),
-            nodeAddress
-          );
+          var addresses = rootAddresses();
           // "covered" after this click is when every rendered file row
           // and every root's node selection is selected now — covered
-          // means the click empties the selection, partially covered
-          // means the click finishes the job.
-          var covered =
-            ids.length + rootAddresses.length > 0 &&
-            ids.every(function (id) {
-              return selected[id] === true;
-            }) &&
-            rootAddresses.every(function (address) {
-              return selectedNodes[address] === true;
+          // means the click empties the selection (node selections
+          // included, nested ones too), partially covered means the
+          // click finishes the job.
+          if (selectionCovers(ids, addresses)) {
+            ids.forEach(function (id) {
+              delete selected[id];
             });
-          ids.forEach(function (id) {
-            if (covered) delete selected[id];
-            else selected[id] = true;
-          });
-          rootAddresses.forEach(function (address) {
-            if (covered) delete selectedNodes[address];
-            else selectedNodes[address] = true;
-          });
-          if (covered) {
-            // A covered selection means nothing else rode along to
-            // keep: nested node selections leave with the sweep.
             Object.keys(selectedNodes).forEach(function (address) {
               delete selectedNodes[address];
+            });
+          } else {
+            ids.forEach(function (id) {
+              selected[id] = true;
+            });
+            addresses.forEach(function (address) {
+              selectedNodes[address] = true;
             });
           }
           refresh();
