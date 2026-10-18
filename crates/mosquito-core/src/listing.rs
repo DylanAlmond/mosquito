@@ -159,10 +159,12 @@ fn root_keys(roots: &[FolderNode<'_>]) -> Vec<String> {
 
 /// Shading (ADR-0002): a whole expanded region paints grey at even
 /// depth, falls back to the plain surface at odd — alternating per
-/// nesting level. The name-text indent (16px per depth, ADR-0004) rides
-/// on each row as its `--depth` token; shading stays computed, since a
-/// collapsed folder row keeps its parent's shade. The server paints the
-/// default expansion; the client recomputes on every toggle.
+/// nesting level. The depth geometry of ADR-0004 rides each tree row
+/// as its `--depth` token (name-text indent, chevron carry, member
+/// catch-up — the stylesheet and the client-side script turn the token
+/// into pixels; loose rows carry no token). Shading stays computed,
+/// since a collapsed folder row keeps its parent's shade. The server
+/// paints the default expansion; the client recomputes on every toggle.
 fn expanded_shade(depth: usize) -> u8 {
     if depth % 2 == 0 { 1 } else { 0 }
 }
@@ -435,11 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn listing_indents_name_text_by_depth_through_the_depth_token() {
+    fn listing_stamps_tree_members_with_their_depth_token() {
         // The depth each member renders at — root 0, direct member 1,
-        // member under the subfolder 2 — rides each row as its
-        // `--depth` custom property (ADR-0004); the stylesheet turns it
-        // into 16px-per-level padding on the name text only.
+        // member under the subfolder 2 — rides each tree row as its
+        // `--depth` custom property (ADR-0004). The stylesheet and the
+        // client script turn the token into the name-text indent, the
+        // chevron carry, and the member catch-up; loose rows carry no
+        // token (asserted in listing_loose_files_carry_no_tree_markup).
         let files = vec![
             shared_file(0, "top.txt", None),
             member(1, "beach.jpg", "Photographs", "beach.jpg"),

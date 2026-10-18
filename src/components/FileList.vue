@@ -53,10 +53,11 @@ function toggleFolder(node: FolderNode) {
   }
 }
 
-/// Shading alternates per depth (ADR-0002) and rows indent their name
-/// text 16px per depth (ADR-0004): an expanded folder's whole region
-/// takes this shade, and a collapsed folder row falls back to the shade
-/// it inherited.
+/// Shading alternates per depth (ADR-0002) and depth geometry indents
+/// rows (ADR-0004: name text 16px per level, folder chevron and member
+/// catch-up riding along): an expanded folder's whole region takes this
+/// shade, and a collapsed folder row falls back to the shade it
+/// inherited.
 type Shade = 0 | 1;
 
 /// The shade an expanded folder paints over itself and everything
@@ -68,6 +69,17 @@ function expandedRegionShade(depth: number): Shade {
 type Row =
   | { kind: 'file'; file: SharedFile; depth: number; shade: Shade }
   | { kind: 'folder'; node: FolderNode; depth: number; shade: Shade };
+
+/// Tree rows carry their depth for the stylesheet (ADR-0004): the name
+/// text indents per level, the chevron moves with it, and member rows
+/// sit one level below their folder's name. Loose files carry no depth
+/// attributes and stay flush — same markup shape the web mirrors.
+function depthAttrs(row: Row): Record<string, string> {
+  const isTreeRow = row.kind === 'folder' || row.file.provenance !== null;
+  return isTreeRow
+    ? { style: `--depth:${row.depth}`, 'data-depth': String(row.depth) }
+    : {};
+}
 
 function folderRows(node: FolderNode, parentShade: Shade): Row[] {
   const open = isExpanded(node);
@@ -229,7 +241,7 @@ function removeSelected() {
           v-if="row.kind === 'folder'"
           class="folder-row"
           role="row"
-          :style="`--depth:${row.depth}`"
+          v-bind="depthAttrs(row)"
           :class="{ 'shade-1': row.shade === 1 }"
           :title="rowTitle(row)"
         >
@@ -265,7 +277,7 @@ function removeSelected() {
           class="file-row"
           :class="{ 'is-selected': isSelected(row.file.id), 'shade-1': row.shade === 1 }"
           :title="rowTitle(row)"
-          :style="`--depth:${row.depth}`"
+          v-bind="depthAttrs(row)"
           role="row"
           :aria-selected="isSelected(row.file.id)"
           @click="toggleFile(row.file.id)"
@@ -352,16 +364,26 @@ function removeSelected() {
 }
 
 /* One font size for all rows (ADR-0004): the depth cue moves to
-   geometry — the name text indents 16px per depth while the controls
-   keep their grid columns (the row sets a matching `--depth`). */
+   geometry — name text indents 16px per depth; the folder chevron
+   travels with it so the tree edge reads as one line. Member rows
+   catch up the chevron slot (36px: column + gap) on top of their own
+   depth, so everything inside a folder sits exactly one level right of
+   the folder's own name. Loose rows carry no depth tokens: flush. */
 .folder-row,
 .file-row {
   font-size: 0.875rem;
 }
 
-.folder-name,
-.file-name {
+.folder-name {
   padding-left: calc(16px * var(--depth, 0));
+}
+
+.folder-chevron {
+  margin-left: calc(16px * var(--depth, 0));
+}
+
+.file-row[data-depth] .file-name {
+  padding-left: calc(16px * var(--depth, 0) + 36px);
 }
 
 .folder-row {

@@ -59,8 +59,8 @@ too:
 
 - Shading is a `data-shade` **attribute** on the web where the app uses
   a `shade-1` **class**; both mean the same alternating grey region
-  (ADR-0002), with the 16px-per-depth name-text indent mirroring too
-  (ADR-0004).
+  (ADR-0002), with the 16px-per-depth indent (name text, chevron, and
+  member catch-up) mirroring too (ADR-0004).
 - Folder-checkbox labels differ: the web says "Select all files in
   `<name>`" where the app says "Select or deselect all files in
   `<name>`" — the tests key on `[data-select]`/`[data-subtree]` and the

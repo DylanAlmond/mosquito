@@ -185,7 +185,7 @@ describe('FileList', () => {
     ).toBe('mixed');
   });
 
-  it('stamps every rendered row with its depth token (ADR-0004)', async () => {
+  it('stamps tree rows with their depth tokens and keeps loose files flush (ADR-0004)', async () => {
     const wrapper = mountList();
 
     const findRow = (text: string, selector: string) =>
@@ -196,28 +196,38 @@ describe('FileList', () => {
           return match.exists() && match.text() === text;
         })!;
 
-    // jsdom normalizes the custom property spelling; collapse it back.
-    const depthToken = (row: any) => row.attributes('style')!.replace(/\s+/g, '');
+    // Loose files carry no depth attributes: they stay flush.
+    const loose = findRow('notes.txt', '.file-name');
+    expect(loose.attributes('style')).toBeUndefined();
+    expect(loose.attributes('data-depth')).toBeUndefined();
 
-    // Folder roots and loose files sit at depth 0.
-    expect(depthToken(findRow('notes.txt', '.file-name'))).toContain('--depth:0');
-    expect(depthToken(findRow('Photos', '.folder-name'))).toBe('--depth:0;');
-    // Members one level under the folder storing them.
-    expect(depthToken(findRow('beach.jpg', '.file-name'))).toBe('--depth:1;');
-    expect(depthToken(findRow('vacation', '.folder-name'))).toBe('--depth:1;');
+    // Folder roots indent at their own depth; the chevron token rides
+    // the same row.
+    const photos = findRow('Photos', '.folder-name');
+    expect(photos.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:0;');
+    expect(photos.attributes('data-depth')).toBe('0');
 
-    // Expanding the subfolder reveals its member at depth 2 (the
-    // first `beach.jpg` stays Photos' depth-1 member).
-    await findRow('vacation', '.folder-name')
-      .find('[aria-label="Expand vacation"]')
-      .trigger('click');
+    // Members one level under the folder storing them; the extra
+    // chevron-slot catch-up lives in the stylesheet, not the token.
+    const member = findRow('beach.jpg', '.file-name');
+    expect(member.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:1;');
+    expect(member.attributes('data-depth')).toBe('1');
+    // Subfolder rows carry their own depth.
+    const vacation = findRow('vacation', '.folder-name');
+    expect(vacation.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:1;');
+    expect(vacation.attributes('data-depth')).toBe('1');
+
+    // Expanding the subfolder reveals its member at depth 2 (the first
+    // `beach.jpg` stays Photos' depth-1 member).
+    await vacation.find('[aria-label="Expand vacation"]').trigger('click');
     expect(
       wrapper
         .findAll('.file-row')
         .some(
           (row: any) =>
             row.find('.file-name').text() === 'beach.jpg' &&
-            depthToken(row) === '--depth:2;'
+            row.attributes('style')!.replace(/\s+/g, '') === '--depth:2;' &&
+            row.attributes('data-depth') === '2'
         )
     ).toBe(true);
   });

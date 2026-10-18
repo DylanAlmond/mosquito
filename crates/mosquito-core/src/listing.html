@@ -229,9 +229,9 @@
         font-size: 0.75rem;
       }
       /* Expandable folder rows (ADR-0002): the hierarchy is carried by
-         the alternating shade plus the 16px-per-depth indent the rows
-         set for their name text (ADR-0004). The row itself is never a
-         toggle: only its chevron is. */
+         the alternating shade plus the 16px-per-depth indent — the
+         name text indents and the chevron travels with it (ADR-0004).
+         The row itself is never a toggle: only its chevron is. */
       .folder-row {
         display: grid;
         grid-template-columns: 32px 32px minmax(0, 1fr);
@@ -243,14 +243,20 @@
         font-weight: 600;
         line-height: 1;
       }
-      /* Rows carry `--depth` (server-rendered or, on the desktop, from
-         the row's own depth); the name text takes the indent, the
-         controls keep their columns. The step is a plain 16px so the
-         web column matches the app's exactly (ADR-0003: same values,
-         not just same names). */
-      .folder-row .folder-name,
-      .file-row a > span {
+      /* Rows carry `--depth` (server-rendered, mirroring the app's row
+         tokens): name text indents 16px per depth; the folder chevron
+         moves with it. Member rows catch up the chevron slot (36px:
+         column + gap) on top of their own depth, so everything inside
+         a folder sits exactly one level right of the folder's own
+         name; loose rows carry no depth attributes and stay flush. */
+      .folder-row .folder-name {
         padding-left: calc(16px * var(--depth, 0));
+      }
+      .folder-chevron {
+        margin-left: calc(16px * var(--depth, 0));
+      }
+      .file-row[data-depth] a > span {
+        padding-left: calc(16px * var(--depth, 0) + 36px);
       }
       [data-shade="1"] {
         background: var(--folder-shade);

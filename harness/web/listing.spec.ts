@@ -93,11 +93,13 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
     '1'
   );
   await expect(notes).toHaveAttribute('data-shade', '1');
-  // The indent itself: computed padding grows 16px per depth, loose
-  // rows and folder roots stay flush.
+  // The indent itself: the name text grows 16px per depth and member
+  // rows catch up the chevron slot (+36px), so everything under
+  // `Photographs` sits past the folder's own name; loose rows and
+  // folder roots stay flush.
   await expect(page.locator('.file-row[data-depth="1"]:visible a > span')).toHaveCSS(
     'padding-left',
-    '16px'
+    '52px'
   );
   await expect(
     page.locator('.folder-row[data-folder-key="Photographs/notes"] .folder-name')
@@ -108,7 +110,11 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
   );
   await expect(page.locator('.file-row[data-depth="2"] a > span').first()).toHaveCSS(
     'padding-left',
-    '32px'
+    '68px'
+  );
+  await expect(page.locator('.file-row:not([data-depth]) a > span').first()).toHaveCSS(
+    'padding-left',
+    '0px'
   );
 
   await page.screenshot({ path: shot('folder-groups') });
