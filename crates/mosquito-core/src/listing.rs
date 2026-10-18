@@ -122,10 +122,12 @@ fn format_size(bytes: u64) -> String {
 /// roots share a name (the second appearance of `Photos` becomes
 /// `Photos-2`, the third `Photos-3`, …), mirroring the archive
 /// planner's collision handling — plus the subfolder path for nested
-/// rows. Keys follow the folder root, not its render position (the
-/// scheme the desktop list keys its state by), so a re-render or an
-/// added root never shifts a folder's identity, and no absolute
-/// filesystem path is ever embedded: the name only.
+/// rows. The name stands in for the folder root's identity (the scheme
+/// the desktop list keys its state by); unlike on the desktop, the key
+/// is appearance-ranked rather than path-based, so a key is only
+/// renumbered when the first-appearance order of same-named roots
+/// changes — e.g. when the earlier same-named root is removed. No
+/// absolute filesystem path is ever embedded: the name only.
 fn folder_key(root_key: &str, sub_path: &str) -> String {
     if sub_path.is_empty() {
         root_key.to_string()
@@ -477,12 +479,12 @@ mod tests {
     }
 
     #[test]
-    fn listing_folder_keys_follow_the_roots_not_the_render_order() {
+    fn listing_folder_keys_rank_by_first_appearance_not_render_position() {
         // Whichever filesystem root appears first in the shared list
         // takes the bare key; the later same-named one is suffixed.
         // The subtree ids pin each row's owner (a different physical
         // root per ordering), so the same assertions verify keys that
-        // follow the root's first appearance — the key set
+        // rank by the root's first appearance — the key set
         // {Photos, Photos-2} never shifts with position.
         let photos_first = vec![
             member(0, "beach.jpg", "Photos", "beach.jpg"),

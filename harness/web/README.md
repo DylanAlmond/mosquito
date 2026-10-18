@@ -39,7 +39,7 @@ breakage:
 | `.file-row` / `.file-row.is-selected` | file rows (loose and tree members alike), highlighted rows |
 | `.file-row[data-depth="n"]` | a tree member's nesting depth (loose files carry none) |
 | `.folder-row` | an expandable folder row (root or subfolder) |
-| `.folder-row[data-folder-key="Photographs"]` / `.folder-row[data-folder-key="Photographs/notes"]` | a folder row by its tree key: the folder root's display name plus its subfolder path; the first root to carry a name keeps it bare, each later same-named root appends `-2`, `-3`, … (keys follow the folder root across re-renders and added roots) |
+| `.folder-row[data-folder-key="Photographs"]` / `.folder-row[data-folder-key="Photographs/notes"]` | a folder row by its tree key: the folder root's display name plus its subfolder path; the first root to carry a name keeps it bare, each later same-named root appends `-2`, `-3`, … Keys are appearance-ranked: they hold across re-renders and added roots, and only renumber when the first-appearance order of same-named roots changes (e.g. removing the earlier same-named root) |
 | `.folder-name` | a folder row's display name |
 | `[aria-label="Collapse <name>"]` / `[aria-label="Expand <name>"]` | the chevron only — the folder row, its name, and its body never toggle |
 | `[aria-expanded="true"]` / `[aria-expanded="false"]` | a folder's expansion state |
