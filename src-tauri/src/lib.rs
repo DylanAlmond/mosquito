@@ -1,7 +1,19 @@
 mod commands;
 #[cfg(all(debug_assertions, feature = "pilot"))]
 mod harness;
-#[cfg(all(windows, not(debug_assertions)))]
+// Issue #18: the values the Explorer registration publishes live in
+// `shell::registration`, compiled whenever tests can reach them so debug
+// builds can pin them. The registration glue inside `shell` stays
+// gated to release Windows builds, so a debug build never writes the
+// registry (and non-Windows release builds compile none of it).
+//
+// Invariant: the module gate (`any(windows, test)` here) is the loosest
+// of the three — inside `shell`, `registration` is gated
+// `any(test, all(windows, not(debug_assertions)))` and the registry
+// glue `all(windows, not(debug_assertions))` — so writing the registry
+// is impossible outside a release Windows build, whatever shows up in
+// `registration`.
+#[cfg(any(windows, test))]
 mod shell;
 
 use crate::commands::*;
