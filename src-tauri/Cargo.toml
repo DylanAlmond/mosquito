@@ -14,6 +14,12 @@ edition = "2021"
 name = "mosquito_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Debug tooling for the agent UI harness (harness/desktop/README.md).
+# Deliberately not in `default`: release builds use default features, so
+# keeping `pilot` out of default is what keeps it out of release binaries.
+pilot = ["dep:tauri-plugin-pilot"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -25,6 +31,28 @@ serde_json = "1"
 mosquito-core = { path = "../crates/mosquito-core" }
 tauri-plugin-dialog = "2.7.3"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+# Agent UI visibility (issue #7): the tauri-pilot plugin and its CLI talk
+# over a local Named Pipe / socket, and are debug tooling — never shipped.
+# Cargo has no profile-gated dependencies (`debug_assertions` is not a
+# supported cfg in target tables), so the equivalent documented mechanism
+# is an optional dependency behind the `pilot` feature, OFF by default:
+# release builds (tauri-action CI, plain `cargo build --release`) resolve
+# default features and therefore never link pilot code, while dev opts in
+# explicitly with `tauri dev --features pilot`. The registration in
+# `lib.rs` is also `#[cfg(...)]`-gated, and errors out if `pilot` is ever
+# enabled in release. The `pilot:default` capability stays declared in
+# `capabilities/pilot.toml` (dev-only too; `build.rs` feeds it to the
+# ACL resolution under the same feature); its grant is inert in release
+# because (as the comment next to the registration in `lib.rs`
+# explains) nothing it allows is reachable when the plugin never
+# registers.
+tauri-plugin-pilot = { version = "0.8.1", default-features = false, optional = true }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

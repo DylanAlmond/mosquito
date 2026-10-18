@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use mosquito_core::{qr_svg, AddFilesOutcome, FileId, ServerInfo, SharedFile, Sharer};
 use tauri::State;
 
+use crate::PendingShareFiles;
+
 #[tauri::command]
 pub async fn list_files(sharer: State<'_, Sharer>) -> Result<Vec<SharedFile>, String> {
     Ok(sharer.files())
@@ -47,4 +49,19 @@ pub async fn get_qr(sharer: State<'_, Sharer>) -> Result<String, String> {
         .url
         .ok_or_else(|| "server is not running".to_string())?;
     qr_svg(&url).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn take_pending_share_paths(
+    pending: State<'_, PendingShareFiles>,
+) -> Result<Vec<String>, String> {
+    Ok(pending.take())
+}
+
+#[tauri::command]
+pub async fn register_context_menu() -> Result<(), String> {
+    #[cfg(all(windows, not(debug_assertions)))]
+    crate::shell::register_context_menu().map_err(|error| error.to_string())?;
+
+    Ok(())
 }

@@ -26,9 +26,20 @@
         color: #000;
         background: #fff;
         font-synthesis: none;
+        --ink: #000;
+        --surface: #fff;
+        --muted: #777;
+        --radius: 0.5rem;
+        /* Folder-tree shading token, mirroring the desktop app's
+           stylesheet token (light scheme only, per ADR-0002). */
+        --folder-shade: #f1f1f1;
       }
       * {
         box-sizing: border-box;
+        margin: 0;
+      }
+      [hidden] {
+        display: none !important;
       }
       body {
         height: 100dvh;
@@ -38,6 +49,30 @@
         color: #000;
         font-size: 1rem;
         overflow: hidden;
+      }
+      button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        padding: 0;
+        color: inherit;
+        font: inherit;
+        transition: all 0.16s ease-out;
+        border: none;
+        background: transparent;
+      }
+      button:not(:disabled) {
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.5;
+      }
+      button svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
       }
       .page {
         display: flex;
@@ -68,11 +103,71 @@
       .file-count {
         display: flex;
         align-items: center;
-        min-height: 3rem;
+        /* Files match the folder row height now (ADR-0004 revision):
+           the 38px strip is the shared row height, header included. */
+        min-height: 2.375rem;
         margin: 0;
         padding: 0 0.875rem;
         border-bottom: 2px solid #000;
+        font-size: 0.875rem;
         font-weight: 600;
+      }
+      /* Grid rows: checkbox, content, trailing control — the desktop
+         list's grid with a download button where the app has delete. */
+      .files-header {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr) 32px;
+        align-items: center;
+        column-gap: 4px;
+        min-height: 2.375rem;
+        padding: 0 0.875rem;
+        border-bottom: 2px solid #000;
+        font-size: 0.875rem;
+        font-weight: 600;
+      }
+      .files-header .file-count {
+        display: block;
+        min-height: 0;
+        padding: 0;
+        border-bottom: none;
+      }
+      .file-count {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* The download button: icon-only where the app has its action
+         button, hidden (invisible, inert) until something is selected. */
+      .download-selected {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        padding: 0;
+        color: inherit;
+        justify-self: end;
+        visibility: hidden;
+      }
+      .download-selected.is-visible {
+        visibility: visible;
+      }
+      .download-selected:hover,
+      .download-selected:focus-visible {
+        opacity: 0.5;
+      }
+      .download-selected svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
+      }
+      /* Desktop list behavior: the entire row inverts, checkbox icon
+         included (the icons stroke with currentColor). */
+      .file-row:hover,
+      .file-row.is-selected {
+        background: #000;
+        color: #fff;
       }
       .file-list {
         margin: 0;
@@ -83,7 +178,6 @@
         overscroll-behavior: contain;
         scrollbar-color: #000 transparent;
         scrollbar-width: thin;
-        
       }
       .file-list::-webkit-scrollbar {
         width: 6px;
@@ -92,26 +186,41 @@
         border-radius: 9999px;
         background: #000;
       }
-      .file-row + .file-row {
+      /* Rows and group headers are flat siblings; every row but the
+         first gets a top border, no matter what kind of row precedes
+         it — the desktop list's exact rule. */
+      .file-list > li {
         border-top: 1px solid #000;
+      }
+      .file-list > li:first-child {
+        border-top: none;
+      }
+      /* Member rows keep the header's grid — checkbox first, name and
+         size filling the rest; the name text is what the depth indent
+         moves, the columns never wander. */
+      .file-row {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 4px;
+        padding: 0 0.875rem;
       }
       .file-row a {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 0.75rem;
-        min-height: 3rem;
-        padding: 0.5rem 0.875rem;
+        /* Files match the folder row height now (ADR-0004 revision):
+           the 38px strip is the shared row height, header included. */
+        min-height: 2.375rem;
         color: inherit;
         text-decoration: none;
+        /* One font size for all rows (ADR-0004) — folder rows already
+           carry it. */
+        font-size: 0.875rem;
         transition:
           background-color 140ms ease,
           color 140ms ease;
-      }
-      .file-row a:hover,
-      .file-row a:focus-visible {
-        background: #000;
-        color: #fff;
       }
       .file-row a:focus-visible {
         outline: 2px solid #777;
@@ -124,6 +233,59 @@
       .file-row small {
         flex: 0 0 auto;
         font-size: 0.75rem;
+      }
+      /* Expandable folder rows (ADR-0002): the hierarchy is carried by
+         the alternating shade plus the 16px-per-depth indent — the
+         name text indents and the chevron travels with it (ADR-0004).
+         The row itself is never a toggle: only its chevron is. */
+      .folder-row {
+        display: grid;
+        grid-template-columns: 32px 32px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 4px;
+        min-height: 38px;
+        padding: 0 0.875rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        line-height: 1;
+      }
+      /* Rows carry `--depth` (server-rendered, mirroring the app's row
+         tokens): name text indents 16px per depth; the folder chevron
+         moves with it. Member rows catch up the chevron slot (36px:
+         column + gap) on top of their own depth, so everything inside
+         a folder sits exactly one level right of the folder's own
+         name; loose rows carry no depth attributes and stay flush. */
+      .folder-row .folder-name {
+        padding-left: calc(16px * var(--depth, 0));
+      }
+      .folder-chevron {
+        margin-left: calc(16px * var(--depth, 0));
+      }
+      .file-row[data-depth] a > span {
+        padding-left: calc(16px * var(--depth, 0) + 36px);
+      }
+      [data-shade="1"] {
+        background: var(--folder-shade);
+      }
+      .folder-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .folder-chevron svg {
+        display: block;
+        width: 1.5rem;
+        height: 1.5rem;
+        transition: transform 140ms ease;
+      }
+      .folder-chevron.is-collapsed svg {
+        transform: rotate(180deg);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .folder-chevron svg {
+          transition: none;
+        }
       }
       .empty-state {
         margin: 0;
@@ -148,7 +310,8 @@
         color: #000;
       }
       @media (prefers-reduced-motion: reduce) {
-        .file-row a {
+        .file-row a,
+        button {
           transition: none;
         }
       }
@@ -158,7 +321,7 @@
     <main class="page">
       <header class="page-header"><h1>Mosquito</h1></header>
       <section class="listing" aria-label="Shared files">
-        <p class="file-count">{{FILE_COUNT}}</p>
+        {{LIST_HEADER}}
         {{FILE_CONTENT}}
       </section>
       <footer class="page-footer">
@@ -166,5 +329,214 @@
         <a href="https://github.com/DylanAlmond/mosquito" target="_blank" rel="noopener">GitHub</a>
       </footer>
     </main>
+    <script>
+      // Progressive enhancement only: with JavaScript off, the
+      // checkboxes never appear and the per-file links stay the only
+      // (and fully working) way to download; folders render in their
+      // default expansion (top level open unless over the five-child
+      // budget, subfolders closed).
+      (function () {
+        var checkboxes = Array.prototype.slice.call(
+          document.querySelectorAll('[data-select]')
+        );
+        var folderButtons = Array.prototype.slice.call(
+          document.querySelectorAll('[data-subtree]')
+        );
+        var chevrons = Array.prototype.slice.call(
+          document.querySelectorAll('[data-toggle]')
+        );
+        var selectAll = document.getElementById('select-all');
+        var downloadButton = document.getElementById('download-selected');
+        if (!checkboxes.length || !selectAll || !downloadButton) return;
+
+        var selected = {};
+
+        function selectedIds() {
+          var ids = [];
+          for (var id in selected) {
+            if (selected[id]) ids.push(id);
+          }
+          return ids;
+        }
+
+        // Folder checkboxes act on the whole subtree — the server lists
+        // every member id (collapsed ones included) in `data-subtree`,
+        // so what is folded away never changes the outcome.
+        function subtreeIds(button) {
+          return button.dataset.subtree.split(',');
+        }
+
+        function subtreeCount(button) {
+          var count = 0;
+          subtreeIds(button).forEach(function (id) {
+            if (selected[id] === true) count += 1;
+          });
+          return count;
+        }
+
+        function setBox(on, checkbox) {
+          checkbox.setAttribute('aria-checked', on ? 'true' : 'false');
+          var checked = checkbox.querySelector('.icon-checked');
+          var unchecked = checkbox.querySelector('.icon-unchecked');
+          if (checked) checked.style.display = on ? '' : 'none';
+          if (unchecked) unchecked.style.display = on ? 'none' : '';
+          var li = checkbox.closest('.file-row');
+          if (li) li.classList.toggle('is-selected', on);
+        }
+
+        // Expansion state keyed by folder key (the folder root's
+        // display name — disambiguated among same-named roots — plus
+        // the subfolder path); the server renders the default and each
+        // chevron carries it as aria-expanded. Like the desktop, none
+        // of this survives a page reload — the default state is always
+        // the starting point.
+        var expanded = {};
+        chevrons.forEach(function (chevron) {
+          expanded[chevron.dataset.toggle] =
+            chevron.getAttribute('aria-expanded') === 'true';
+        });
+
+        // Expand/collapse is chevron-only: a folder row's click never
+        // toggles it. Rows are flat in the DOM in tree order, so one
+        // depth-driven scan decides visibility and shading for
+        // everything — matching the desktop's derivation: a region is
+        // grey when the folder showing it sits at even depth, and a
+        // collapsed folder row falls back to its parent's shade.
+        function applyExpansion() {
+          var stack = [];
+          Array.prototype.forEach.call(
+            document.querySelectorAll('.file-list > li'),
+            function (row) {
+              var isFolder = row.classList.contains('folder-row');
+              if (!isFolder && row.dataset.depth === undefined) {
+                // Loose files sit outside every tree.
+                row.hidden = false;
+                return;
+              }
+
+              var depth = Number(row.dataset.depth);
+              while (stack.length && stack[stack.length - 1].depth >= depth) {
+                stack.pop();
+              }
+              var parent = stack[stack.length - 1];
+
+              if (isFolder) {
+                var key = row.dataset.folderKey;
+                var open = expanded[key];
+                // Even depth regions are grey, odd ones fall back — and
+                // a collapsed folder row keeps its parent's shade.
+                var shade = open ? (depth % 2 === 0 ? 1 : 0) : parent ? parent.shade : 0;
+                row.hidden = !!parent && !isEveryAncestorExpanded(stack);
+                row.dataset.shade = String(shade);
+                stack.push({ depth: depth, open: open, shade: shade });
+
+                var chevron = row.querySelector('[data-toggle]');
+                if (chevron) {
+                  chevron.setAttribute('aria-expanded', open ? 'true' : 'false');
+                  chevron.setAttribute(
+                    'aria-label',
+                    (open ? 'Collapse ' : 'Expand ') +
+                      row.querySelector('.folder-name').textContent
+                  );
+                  chevron.classList.toggle('is-collapsed', !open);
+                }
+              } else {
+                row.hidden = !isEveryAncestorExpanded(stack);
+                row.dataset.shade = String(parent ? parent.shade : 0);
+              }
+            }
+          );
+        }
+
+        // Whether every ancestor still on the scan stack is open —
+        // i.e. whether this row sits inside an expanded region.
+        function isEveryAncestorExpanded(stack) {
+          for (var i = 0; i < stack.length; i += 1) {
+            if (!stack[i].open) return false;
+          }
+          return true;
+        }
+
+        function refresh() {
+          checkboxes.forEach(function (checkbox) {
+            setBox(selected[checkbox.dataset.select] === true, checkbox);
+          });
+
+          folderButtons.forEach(function (button) {
+            var ids = subtreeIds(button);
+            var count = subtreeCount(button);
+            // Desktop mirrors aria-checked="mixed" for partially
+            // selected subtrees while still showing the unchecked icon.
+            setBox(count === ids.length && ids.length > 0, button);
+            if (count > 0 && count < ids.length) {
+              button.setAttribute('aria-checked', 'mixed');
+            }
+          });
+
+          var ids = selectedIds();
+          var every = ids.length > 0 && ids.length === checkboxes.length;
+          setBox(every, selectAll);
+          selectAll.setAttribute(
+            'aria-checked',
+            ids.length === 0 ? 'false' : every ? 'true' : 'mixed'
+          );
+
+          // The download button hides when nothing is selected; one
+          // file links directly, several becomes a zip of the selection.
+          if (ids.length === 0) {
+            downloadButton.classList.remove('is-visible');
+            downloadButton.href = '/download/zip';
+          } else if (ids.length === 1) {
+            downloadButton.classList.add('is-visible');
+            downloadButton.href = '/download/' + ids[0];
+          } else {
+            downloadButton.classList.add('is-visible');
+            downloadButton.href = '/download/zip?ids=' + ids.join(',');
+          }
+        }
+
+        checkboxes.forEach(function (checkbox) {
+          checkbox.hidden = false;
+          checkbox.addEventListener('click', function () {
+            var id = checkbox.dataset.select;
+            selected[id] = !selected[id];
+            refresh();
+          });
+        });
+
+        selectAll.hidden = false;
+        selectAll.addEventListener('click', function () {
+          // "every" after this click is when every file is selected now.
+          var every = selectedIds().length === checkboxes.length;
+          checkboxes.forEach(function (checkbox) {
+            selected[checkbox.dataset.select] = !every;
+          });
+          refresh();
+        });
+
+        folderButtons.forEach(function (button) {
+          button.hidden = false;
+          button.addEventListener('click', function () {
+            var every = subtreeCount(button) === subtreeIds(button).length;
+            subtreeIds(button).forEach(function (id) {
+              selected[id] = !every;
+            });
+            refresh();
+          });
+        });
+
+        chevrons.forEach(function (chevron) {
+          chevron.hidden = false;
+          chevron.addEventListener('click', function () {
+            var key = chevron.dataset.toggle;
+            expanded[key] = !expanded[key];
+            applyExpansion();
+          });
+        });
+
+        applyExpansion();
+        refresh();
+      })();
+    </script>
   </body>
 </html>

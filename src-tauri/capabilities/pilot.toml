@@ -1,0 +1,31 @@
+# Dev-tooling capability for the tauri-pilot agent harness (issue #7).
+#
+# Written as a .toml rather than a .json capability because the
+# capability parser only accepts comments in TOML — and this file is
+# where the release statement lives:
+#
+#   The `pilot:default` grant is inert in release builds. The plugin
+#   dependency it belongs to never links into release (the `pilot`
+#   feature is not part of `default`; src-tauri/Cargo.toml), and the
+#   plugin registration sits behind
+#   `#[cfg(all(debug_assertions, feature = "pilot"))]` in lib.rs — so
+#   nothing this permission allows is ever reachable in a released
+#   binary. Registration against a capability is what makes its grant
+#   reachable; that never happens in release.
+#
+# `build.rs` feeds this file into capability resolution only when the
+# `pilot` feature is enabled (`CARGO_FEATURE_PILOT` in the build
+# script). Builds without the feature therefore don't fail on a
+# permission whose plugin is not in their dependency graph, and a
+# release build never sees this file at all.
+#
+# Dev usage (harness/desktop/README.md):
+#   yarn tauri dev --features pilot
+
+identifier = "pilot"
+description = """
+Grants the tauri-pilot dev IPC surface (debug tooling, never shipped; \
+registered alongside the feature-gated plugin in src-tauri/Cargo.toml).
+"""
+windows = ["main"]
+permissions = ["pilot:default"]

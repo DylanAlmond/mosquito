@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, type OpenDialogOptions } from '@tauri-apps/plugin-dialog';
 import { ref, watch } from 'vue';
 import ChevronIcon from '../assets/chevron-compact-up.svg';
 import CopyIcon from '../assets/copy.svg';
 import CopiedIcon from '../assets/square-rounded-check.svg';
+import ChooseSection from './ChooseSection.vue';
 import FileList from './FileList.vue';
 import { useDragDrop } from '../composables/useDragDrop';
 import { useSharer } from '../composables/useSharer';
@@ -22,22 +23,26 @@ watch(
   }
 );
 
-async function chooseFiles() {
+// One guarded dialog flow; a picker can't stack while one is already open.
+async function pick(options: OpenDialogOptions) {
   if (busy.value || selecting.value) return;
 
   selecting.value = true;
   try {
-    const selected = await open({
-      title: 'Choose files to share',
-      multiple: true,
-      directory: false
-    });
-
-    if (selected) await addPaths(selected);
+    const selected = await open(options);
+    if (selected) await addPaths(Array.isArray(selected) ? selected : [selected]);
   } finally {
     selecting.value = false;
   }
 }
+
+// Picking folders wholesale is deliberately its own affordance, not a hybrid
+// dialog mixed with the file picker (ticket #4).
+const chooseFiles = () =>
+  pick({ title: 'Choose files to share', multiple: true, directory: false });
+
+const chooseFolder = () =>
+  pick({ title: 'Choose folder to share', multiple: true, directory: true });
 
 async function copyUrl() {
   if (!info.value.url) return;
@@ -52,17 +57,24 @@ async function copyUrl() {
 </script>
 
 <template>
-  <button
-    v-if="!info.running"
-    class="dropzone"
-    :class="{ 'is-dragging': dragging }"
-    type="button"
-    :disabled="busy || selecting"
-    :aria-busy="busy || selecting"
-    @click="chooseFiles"
-  >
-    <span class="drop-title">Click or Drop files here</span>
-  </button>
+  <template v-if="!info.running">
+    <button
+      class="dropzone"
+      :class="{ 'is-dragging': dragging }"
+      type="button"
+      :disabled="busy || selecting"
+      :aria-busy="busy || selecting"
+      @click="chooseFiles"
+    >
+      <span class="drop-title">Drop files or folders here</span>
+    </button>
+
+    <ChooseSection
+      :disabled="busy || selecting"
+      @choose-files="chooseFiles"
+      @choose-folder="chooseFolder"
+    />
+  </template>
 
   <template v-else>
     <section
@@ -94,6 +106,12 @@ async function copyUrl() {
         <span class="sr-only">{{ copied ? 'Copied' : 'Copy URL' }}</span>
       </button>
     </section>
+
+    <ChooseSection
+      :disabled="busy || selecting"
+      @choose-files="chooseFiles"
+      @choose-folder="chooseFolder"
+    />
 
     <Transition name="files">
       <div v-if="filesExpanded && files.length" class="file-list-transition">
@@ -129,12 +147,6 @@ async function copyUrl() {
 
   background: var(--surface);
   transition: background-color 160ms ease;
-
-  margin-bottom: 1.25rem;
-
-  &.dropzone--active {
-    margin-bottom: 0;
-  }
 
   &:not(:disabled) {
     cursor: pointer;
@@ -204,7 +216,6 @@ async function copyUrl() {
   min-width: 0;
   display: grid;
   grid-template-rows: 1fr;
-  margin-top: 16px;
 }
 
 .files-enter-active,

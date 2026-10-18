@@ -1,0 +1,77 @@
+# Pull-request gates for the UIs (issue #8): the JavaScript unit tests
+# (derivation + list component), the Rust tests (server crate and its
+# mirrored tree derivation), and the web listing harness. The desktop
+# harness stays a local review step — Tauri's dev window can't run on
+# hosted runners — so UI changes are reviewed with `yarn harness:desktop`.
+name: ci
+
+on:
+  pull_request:
+
+jobs:
+  desktop-unit:
+    name: desktop unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: corepack (yarn)
+        run: corepack enable
+
+      - name: install dependencies
+        run: yarn install
+
+      - name: vitest
+        run: yarn test
+
+  rust:
+    name: rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The listing mirrors and the server live here; the tauri crate is
+      # exercised by the publish workflow's builds instead.
+      - name: cargo test (mosquito-core)
+        run: cargo test -p mosquito-core --all-targets
+
+  web-harness:
+    name: web harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: corepack (yarn)
+        run: corepack enable
+
+      - name: install dependencies
+        run: yarn install
+
+      - name: install chromium
+        run: yarn playwright install --with-deps chromium
+
+      # Builds the axum fixture servers (cargo run --example) itself.
+      - name: playwright (harness/web)
+        run: yarn harness:web

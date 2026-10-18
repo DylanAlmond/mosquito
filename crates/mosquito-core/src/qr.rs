@@ -8,7 +8,7 @@ use crate::QrError;
 /// border — scanners expect it.
 pub fn qr_svg(text: &str) -> Result<String, QrError> {
     let code = QrCode::new(text.as_bytes())?;
-    
+
     Ok(code
         .render::<svg::Color>()
         .quiet_zone(true)
