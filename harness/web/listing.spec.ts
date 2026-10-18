@@ -57,7 +57,7 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
   // One folder row per tree node: the root at depth 0, the `notes`
   // subfolder deeper. The root is expanded, so its direct member
   // (beach.jpg) is visible right under it.
-  const root = page.locator('.folder-row[data-folder-key="f0"]');
+  const root = page.locator('.folder-row[data-folder-key="Photographs"]');
   await expect(root).toHaveCount(1);
   await expect(root).toHaveAttribute('data-depth', '0');
   await expect(root.locator('.folder-name')).toHaveText('Photographs');
@@ -72,7 +72,7 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
   ).toContainText('beach.jpg');
 
   // The subfolder starts collapsed: visible row, hidden member.
-  const notes = page.locator('.folder-row[data-folder-key="f0/notes"]');
+  const notes = page.locator('.folder-row[data-folder-key="Photographs/notes"]');
   await expect(notes).toBeVisible();
   await expect(notes).toHaveAttribute('data-depth', '1');
   await expect(notes.locator('[aria-label="Expand notes"]')).toHaveAttribute(
@@ -100,7 +100,7 @@ test('toggles folders through their chevrons only', async ({ page }) => {
   await page.goto(FIXTURE_URL);
 
   // Clicking the row or its name must never toggle: only the chevron.
-  const notes = page.locator('.folder-row[data-folder-key="f0/notes"]');
+  const notes = page.locator('.folder-row[data-folder-key="Photographs/notes"]');
   await notes.click();
   await notes.locator('.folder-name').click();
   await expect(page.locator('.file-row[data-depth="2"]')).toBeHidden();
@@ -124,7 +124,7 @@ test('toggles folders through their chevrons only', async ({ page }) => {
 
   // Collapsing the root hides its whole span; the loose files stay.
   await page.locator('[aria-label="Collapse Photographs"]').click();
-  await expect(page.locator('.folder-row[data-folder-key="f0"]')).toBeVisible();
+  await expect(page.locator('.folder-row[data-folder-key="Photographs"]')).toBeVisible();
   await expect(
     page.locator('.file-row[data-depth="1"]:visible')
   ).toHaveCount(0);

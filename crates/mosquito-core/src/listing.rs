@@ -5,6 +5,8 @@
 //! Pure string building — no store, no I/O — so the page rules are
 //! unit-testable from the shared-file snapshots alone.
 
+use std::collections::HashSet;
+
 use crate::file_store::SharedFile;
 use crate::folder_tree::{FolderNode, build_folder_tree};
 
@@ -30,8 +32,9 @@ pub(crate) fn render_listing(files: &[SharedFile], device_name: &str) -> String 
     for file in &tree.loose {
         items.push_str(&file_row_html(file, None));
     }
-    for (root_index, root) in tree.roots.iter().enumerate() {
-        render_folder(root, root_index, &mut items, true, 0);
+    let keys = root_keys(&tree.roots);
+    for (root, root_key) in tree.roots.iter().zip(&keys) {
+        render_folder(root, root_key, &mut items, true, 0);
     }
 
     let (header, list_html) = if files.is_empty() {
@@ -114,15 +117,42 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
-/// Stable key tying a folder row to its chevron: the root's render-order
-/// index, plus the subfolder path for nested rows. Same-named roots get
-/// different indices, so keys never collide.
-fn folder_key(root_index: usize, sub_path: &str) -> String {
+/// Stable key tying a folder row to its chevron and expansion state:
+/// the folder root's display name — disambiguated only when two folder
+/// roots share a name (the second appearance of `Photos` becomes
+/// `Photos-2`, the third `Photos-3`, …), mirroring the archive
+/// planner's collision handling — plus the subfolder path for nested
+/// rows. Keys follow the folder root, not its render position (the
+/// scheme the desktop list keys its state by), so a re-render or an
+/// added root never shifts a folder's identity, and no absolute
+/// filesystem path is ever embedded: the name only.
+fn folder_key(root_key: &str, sub_path: &str) -> String {
     if sub_path.is_empty() {
-        format!("f{root_index}")
+        root_key.to_string()
     } else {
-        format!("f{root_index}/{sub_path}")
+        format!("{root_key}/{sub_path}")
     }
+}
+
+/// One root key per root, in first-appearance order: the root's display
+/// name, kept bare for the first root to carry it and suffixed for each
+/// later same-named one. Probing the next free suffix — like the
+/// archive planner's `unique_entry_path` — keeps the keys distinct even
+/// when a root is literally named `Photos-2` already. Deterministic:
+/// the same shared-file list always yields the same key assignment.
+fn root_keys(roots: &[FolderNode<'_>]) -> Vec<String> {
+    let mut keys = Vec::with_capacity(roots.len());
+    let mut used: HashSet<String> = HashSet::new();
+    for root in roots {
+        let mut ordinal = 2;
+        let mut candidate = root.name.clone();
+        while !used.insert(candidate.clone()) {
+            candidate = format!("{}-{ordinal}", root.name);
+            ordinal += 1;
+        }
+        keys.push(candidate);
+    }
+    keys
 }
 
 /// Shading (ADR-0002): a whole expanded region paints grey at even
@@ -160,12 +190,12 @@ fn subtree_ids_string(node: &FolderNode<'_>) -> String {
 /// does.
 fn render_folder(
     node: &FolderNode<'_>,
-    root_index: usize,
+    root_key: &str,
     items: &mut String,
     visible: bool,
     parent_shade: u8,
 ) {
-    let key = folder_key(root_index, &node.sub_path);
+    let key = escape_html(&folder_key(root_key, &node.sub_path));
     let expanded_region = expanded_shade(node.depth);
     let expanded_default = node.depth == 0;
     let row_shade = if expanded_default {
@@ -212,7 +242,7 @@ fn render_folder(
         ));
     }
     for child in &node.children {
-        render_folder(child, root_index, items, child_visible, row_shade);
+        render_folder(child, root_key, items, child_visible, row_shade);
     }
 }
 
@@ -281,7 +311,7 @@ mod tests {
     use super::*;
 
     use crate::file_store::FileId;
-    use crate::test_support::{member, shared_file};
+    use crate::test_support::{member, nowhere, shared_file};
 
     // --- escape_html ---
 
@@ -371,7 +401,7 @@ mod tests {
         // (story 10) — here the grey of the expanded root's region.
         assert!(html.contains("aria-expanded=\"false\""));
         assert!(html.contains("aria-label=\"Expand notes\""));
-        assert!(html.contains("data-folder-key=\"f0/notes\" data-shade=\"1\""));
+        assert!(html.contains("data-folder-key=\"Photographs/notes\" data-shade=\"1\""));
         let collapsed_member = html
             .find("<li class=\"file-row\" role=\"row\" data-depth=\"2\" data-shade=\"0\" hidden")
             .expect("collapsed members render hidden");
@@ -414,12 +444,101 @@ mod tests {
         assert!(!html.contains("<span class=\"folder-name\"><script>"));
 
         // Exactly one tree per distinct folder root — the root's own
-        // row is the only one keyed at depth 0 with no subfolder path.
-        assert_eq!(html.matches("data-folder-key=\"f0\"").count(), 1);
+        // row is the only one keyed with no subfolder path, and its
+        // key is the (HTML-escaped) root name, not a path or index.
+        assert_eq!(
+            html.matches("data-folder-key=\"&lt;script&gt;\"").count(),
+            1
+        );
 
         // The expanded root and its visible members carry the shade.
         let count = html.matches("data-shade=\"1\"").count();
         assert!(count >= 2, "folder row and its members are shaded: {count}");
+    }
+
+    #[test]
+    fn listing_keys_folders_by_root_name_with_same_name_disambiguation() {
+        // Two distinct folder roots whose basename is `Photos`: the
+        // first-appearance one keeps the bare name, the later one is
+        // suffixed — distinct keys, no render index anywhere.
+        let files = vec![
+            member(0, "beach.jpg", "Photos", "beach.jpg"),
+            member(1, "trip.txt", "Backup/Photos", "notes/trip.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        assert_eq!(html.matches("data-folder-key=\"Photos\"").count(), 1);
+        assert_eq!(html.matches("data-folder-key=\"Photos-2\"").count(), 1);
+        // The disambiguation carries into the subfolder keys too.
+        assert!(html.contains("data-folder-key=\"Photos-2/notes\""));
+        // No render-order key survives.
+        assert!(!html.contains("data-folder-key=\"f"));
+    }
+
+    #[test]
+    fn listing_folder_keys_follow_the_roots_not_the_render_order() {
+        // Whichever filesystem root appears first in the shared list
+        // takes the bare key; the later same-named one is suffixed.
+        // The subtree ids pin each row's owner (a different physical
+        // root per ordering), so the same assertions verify keys that
+        // follow the root's first appearance — the key set
+        // {Photos, Photos-2} never shifts with position.
+        let photos_first = vec![
+            member(0, "beach.jpg", "Photos", "beach.jpg"),
+            member(1, "trip.txt", "Backup/Photos", "notes/trip.txt"),
+        ];
+        // Same two roots, the shared list reversed: the Backup/Photos
+        // root now leads (its member carries id 0, its row renders
+        // first), so it — not the original owner — keeps the bare name.
+        let backup_first = vec![
+            member(0, "trip.txt", "Backup/Photos", "notes/trip.txt"),
+            member(1, "beach.jpg", "Photos", "beach.jpg"),
+        ];
+
+        for files in [&photos_first, &backup_first] {
+            let html = render_listing(files, "test-device");
+
+            // The first-appearing root (hosting the first-listed
+            // member, subtree "0") holds the bare key in both
+            // orderings, on a different physical root each time.
+            assert_eq!(folder_row_key(&html, "data-subtree=\"0\""), "Photos");
+            assert_eq!(folder_row_key(&html, "data-subtree=\"1\""), "Photos-2");
+            assert_eq!(html.matches("data-folder-key=\"Photos\"").count(), 1);
+            assert_eq!(html.matches("data-folder-key=\"Photos-2\"").count(), 1);
+        }
+    }
+
+    /// The `data-folder-key` of the folder row carrying the given
+    /// subtree button attribute — the row's key sits in its own
+    /// `<li>` tag, before the subtree button inside it.
+    fn folder_row_key<'a>(html: &'a str, subtree_attr: &str) -> &'a str {
+        let row_end = html.find(subtree_attr).expect("the row must render");
+        let marker = "data-folder-key=\"";
+        let key_start = html[..row_end]
+            .rfind(marker)
+            .expect("the row's <li> tag must carry a folder key")
+            + marker.len();
+        let key_end = key_start + html[key_start..].find('"').expect("terminated attribute");
+        &html[key_start..key_end]
+    }
+
+    #[test]
+    fn listing_never_leaks_absolute_paths_into_the_markup() {
+        // Folder keys derive from display names only: no test path
+        // (absolute temp paths through `nowhere()`) may appear.
+        let files = vec![
+            shared_file(0, "loose.txt", None),
+            member(1, "beach.jpg", "Photos", "beach.jpg"),
+            member(2, "trip.txt", "Backup/Photos", "notes/trip.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        assert!(!html.contains("mosquito-nowhere"));
+        assert!(!html.contains(nowhere("Photos").to_string_lossy().as_ref()));
+        assert!(!html.contains(nowhere("Backup/Photos").to_string_lossy().as_ref()));
+        assert!(!html.contains(std::env::temp_dir().to_string_lossy().as_ref()));
     }
 
     #[test]

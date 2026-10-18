@@ -357,11 +357,12 @@
           if (li) li.classList.toggle('is-selected', on);
         }
 
-        // Expansion state keyed by folder key (root index + subfolder
-        // path); the server renders the default and each chevron
-        // carries it as aria-expanded. Like the desktop, none of this
-        // survives a page reload — the default state is always the
-        // starting point.
+        // Expansion state keyed by folder key (the folder root's
+        // display name — disambiguated among same-named roots — plus
+        // the subfolder path); the server renders the default and each
+        // chevron carries it as aria-expanded. Like the desktop, none
+        // of this survives a page reload — the default state is always
+        // the starting point.
         var expanded = {};
         chevrons.forEach(function (chevron) {
           expanded[chevron.dataset.toggle] =
