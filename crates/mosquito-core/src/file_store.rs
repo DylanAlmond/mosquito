@@ -59,17 +59,19 @@ pub struct AddFilesOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct RootId(pub u64);
 
-/// The store's record of an imported folder: where the folder is and how
-/// many files it held when the import's count walk finished (ADR-0005).
-/// Nothing beneath the root is registered on import — its members become
-/// shared files only as they are materialized.
+/// The store's record of an imported folder: where the folder is and a
+/// file count. Nothing beneath the root is registered on import — its
+/// members become shared files only as they are materialized.
 #[derive(Debug, Clone, Serialize)]
 pub struct RootRecord {
     pub id: RootId,
     /// Absolute path of the folder the user imported.
     pub path: PathBuf,
-    /// Files counted at import time. Lazily-known contents may drift
-    /// from this number afterwards — that is the live-subtree contract.
+    /// The live count (ADR-0008 / GLOSSARY): committed at 0 when the
+    /// folder is dropped, updated by the import walk's progress
+    /// checkpoints. Display only on every surface — a climbing count is
+    /// live-subtree drift by design, and nothing materializes because
+    /// of it.
     pub file_count: u64,
 }
 
@@ -316,9 +318,11 @@ impl FileStore {
 
     // -- root records: count-only imports (ADR-0005) ----------------------
 
-    /// Record an imported folder: absolute path plus the file count the
-    /// import's count walk produced. Nothing beneath the root is
-    /// registered here; ids are never reused, even after removal.
+    /// Record an imported folder's drop (ADR-0008): the record commits
+    /// synchronously at drop time, before the count walk starts, with the
+    /// count going live from here — the walk moves it at its progress
+    /// checkpoints. Nothing beneath the root is registered here; ids are
+    /// never reused, even after removal.
     pub fn commit_root_record(&mut self, path: impl Into<PathBuf>, file_count: u64) -> RootRecord {
         let record = RootRecord {
             id: RootId(self.next_root_id),
@@ -328,6 +332,18 @@ impl FileStore {
         self.next_root_id += 1;
         self.roots.push(record.clone());
         record
+    }
+
+    /// Update the root record's live count (ADR-0008): the count walk's
+    /// checkpoint heartbeat, one brief call per checkpoint. The count is
+    /// display only — no registration and no materialization follows
+    /// from it. An unknown id is a no-op: the record was removed while
+    /// its walk still ran (cancel, failure, or the user's own removal),
+    /// and removal wins over any late checkpoint.
+    pub fn update_root_count(&mut self, id: RootId, count: u64) {
+        if let Some(record) = self.roots.iter_mut().find(|record| record.id == id) {
+            record.file_count = count;
+        }
     }
 
     /// Insertion-ordered view of the imported roots.
@@ -1036,6 +1052,66 @@ mod tests {
         assert_eq!(record.file_count, 0);
         // A root record alone counts as content — a shareable, startable state.
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn update_root_count_moves_the_live_count() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("big");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 0);
+
+        // The walk's checkpoints move the number; nothing but the
+        // record's count changes.
+        store.update_root_count(record.id, 500);
+        assert_eq!(store.roots()[0].file_count, 500);
+        assert_eq!(store.list_top().roots[0].file_count, 500);
+        // The count updates never register: the tree stays lazily known.
+        assert!(store.list().is_empty());
+        store.update_root_count(record.id, 1000);
+        assert_eq!(store.roots()[0].file_count, 1000);
+    }
+
+    #[test]
+    fn replayed_or_late_checkpoints_converge_to_whatever_they_carry() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("big");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 0);
+
+        // A re-applied earlier checkpoint (the idempotent convergence
+        // ADR-0008's display-only count allows) just moves the number —
+        // one registration-less write, no duplicated rows.
+        store.update_root_count(record.id, 500);
+        store.update_root_count(record.id, 1000);
+        store.update_root_count(record.id, 500);
+        assert_eq!(store.roots()[0].file_count, 500);
+        assert_eq!(store.list_top().roots[0].file_count, 500);
+        assert!(store.list().is_empty());
+        assert_eq!(store.roots().len(), 1);
+    }
+
+    #[test]
+    fn update_root_count_after_removal_is_a_no_op() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("big");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 0);
+        store.remove_root(record.id).unwrap();
+
+        // The record was removed while its walk still ran (cancel,
+        // failure, or the user's own removal): removal wins over any
+        // late checkpoint, and nothing resurrects.
+        store.update_root_count(record.id, 900);
+        assert!(store.roots().is_empty());
+        assert!(store.list().is_empty());
+        assert!(store.is_empty());
     }
 
     #[test]

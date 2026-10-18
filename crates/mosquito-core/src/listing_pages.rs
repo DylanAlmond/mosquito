@@ -39,9 +39,10 @@ pub struct RootRow {
     /// key, exactly the web listing's rule. The desktop keys its
     /// expansion state by it; no absolute path is ever embedded.
     pub key: String,
-    /// Files counted at import time — lazily-known contents may have
-    /// drifted since (live subtree), which the listing deliberately
-    /// accepts and display-only never re-walks.
+    /// The record's live count (ADR-0008 / GLOSSARY): committed at 0 at
+    /// drop, moved by the walk's checkpoints — lazily-known contents may
+    /// also have drifted since (live subtree), which the listing
+    /// deliberately accepts and display never re-walks.
     pub file_count: u64,
 }
 

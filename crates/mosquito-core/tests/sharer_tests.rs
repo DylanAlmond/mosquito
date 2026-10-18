@@ -358,28 +358,58 @@ fn make_nested_tree(dir: &std::path::Path) -> PathBuf {
     root
 }
 
+/// A flat folder with exactly `total` tiny files — big enough that the
+/// count walk takes many checkpoints to walk it, so cancellation lands
+/// mid-walk deterministically-seen-from-the-caller's side.
+fn make_flat_tree(dir: &std::path::Path, total: usize) -> PathBuf {
+    let root = dir.join("big");
+    std::fs::create_dir(&root).unwrap();
+    for i in 0..total {
+        std::fs::write(root.join(format!("f{i}.txt")), b"x").unwrap();
+    }
+    root
+}
+
 #[tokio::test]
-async fn import_paths_commits_root_records_in_the_background() {
+async fn a_folder_drop_commits_its_root_record_at_drop() {
     let dir = TempDir::new().unwrap();
     let root = make_nested_tree(dir.path());
 
     let sharer = sharer_on("192.0.2.7");
     let started = sharer.import_paths(vec![root.clone()]).await;
 
-    // Nothing happens inline for a folder drop — the run is the product.
+    // Nothing registers inline for a folder drop — the record is the product.
     assert!(started.immediate.added.is_empty());
     assert!(started.immediate.failed.is_empty());
     let run_id = started.run_id.expect("a folder drop starts a run");
 
+    // Committed at drop (ADR-0008), before the walk's outcome is known:
+    // the record already exists with a count at or below the total
+    // (0, or whatever checkpoint the walk reached in the meantime).
+    let roots = sharer.roots();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].path, root);
+    assert!(
+        roots[0].file_count <= 2,
+        "live count is event-driven: got {}",
+        roots[0].file_count
+    );
+    // The server came up in the same synchronous path as the commit —
+    // drop → listening, never gated by the walk.
+    assert!(sharer.status().running);
+
     let statuses = wait_terminated(&sharer, run_id).await;
     assert_eq!(statuses, vec![RootRunStatus::Committed]);
 
-    // Count-only: no shared file was registered under the root.
+    // Count-only, exactly as before: no shared file was registered
+    // under the root, and the record's count converged to the total.
     assert!(sharer.files().is_empty());
     let roots = sharer.roots();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].path, root);
     assert_eq!(roots[0].file_count, 2);
+
+    sharer.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -408,7 +438,7 @@ async fn mixed_drops_register_loose_files_immediately() {
 }
 
 #[tokio::test]
-async fn a_committed_root_record_auto_starts_the_server() {
+async fn a_folder_drop_starts_the_server_at_drop() {
     let dir = TempDir::new().unwrap();
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
@@ -416,10 +446,120 @@ async fn a_committed_root_record_auto_starts_the_server() {
     let sharer = sharer_on("192.0.2.7");
     let started = sharer.import_paths(vec![empty]).await;
     let run_id = started.run_id.expect("a folder drop starts a run");
+
+    // The server is listening already — in the drop's synchronous path,
+    // milliseconds after the commit, never gated by the walk (ADR-0008).
+    assert!(sharer.status().running);
+
     let statuses = wait_terminated(&sharer, run_id).await;
     assert_eq!(statuses, vec![RootRunStatus::Committed]);
+    assert!(sharer.status().running);
 
-    // A root record alone counts as content: the share is live.
+    sharer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_walk_keeps_the_record_count_live_at_its_checkpoints() {
+    let dir = TempDir::new().unwrap();
+    // Two checkpoints' worth of files: the walk must pass 500 and 1000
+    // before finishing, whatever the disk's speed.
+    let root = make_flat_tree(dir.path(), 1100);
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![root]).await;
+    let run_id = started.run_id.expect("a folder drop starts a run");
+
+    // Read the record's number while the walk runs: every observation is
+    // one of the walk's checkpoint values — event-driven (each one was
+    // some real reached-total), monotonic, never past the walk's total.
+    let mut seen: Vec<u64> = Vec::new();
+    let start = std::time::Instant::now();
+    loop {
+        let snapshot = sharer
+            .import_run_status()
+            .into_iter()
+            .find(|snapshot| snapshot.run_id == run_id)
+            .expect("the run is recorded in the registry");
+        let counting = snapshot.roots[0].status == RootRunStatus::Counting;
+
+        seen.push(sharer.roots()[0].file_count);
+
+        if !counting {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "import never finished: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "the recorded count only climbs: {seen:?}"
+        );
+        assert!(pair[1] <= 1100, "checkpoint overflow: {seen:?}");
+    }
+    // The final count is the walk's total, and nothing registered
+    // because of any of it — display only.
+    assert_eq!(sharer.roots()[0].file_count, 1100);
+    assert!(sharer.files().is_empty());
+
+    sharer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_mid_walk_removes_the_record_and_the_walks_materialization() {
+    let dir = TempDir::new().unwrap();
+    // Several checkpoints' worth of files: the walk cannot finish before
+    // the cancel flag lands (it is set microseconds after import_paths
+    // returns), so the removal path is the outcome under test.
+    let root = make_flat_tree(dir.path(), 1500);
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![root]).await;
+    let run_id = started.run_id.expect("a folder drop starts a run");
+
+    // The record exists from the drop, whatever the walk has reached.
+    assert_eq!(sharer.roots().len(), 1);
+
+    assert!(sharer.cancel_import(run_id));
+    let statuses = wait_terminated(&sharer, run_id).await;
+    assert_eq!(statuses, vec![RootRunStatus::Cancelled]);
+
+    // The contract's outcome survives, reached by removal (ADR-0008):
+    // no half-done count stands as a record anywhere — neither in the
+    // store nor on the top listing — and anything materialized under the
+    // record went with the same remove_root sweep a user's delete uses.
+    assert!(sharer.roots().is_empty());
+    assert!(sharer.list_top().roots.is_empty());
+    assert!(sharer.files().is_empty());
+
+    // The drop started the server; the removal of the last content
+    // stops it, exactly like a user's own removal does.
+    assert!(!sharer.status().running);
+}
+
+#[tokio::test]
+async fn cancelling_after_a_root_committed_keeps_it() {
+    let dir = TempDir::new().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![empty]).await;
+    let run_id = started.run_id.unwrap();
+    wait_terminated(&sharer, run_id).await;
+
+    // The run settled before the cancel arrived: the committed record
+    // is not retroactively cancelled.
+    assert!(sharer.cancel_import(run_id));
+    assert_eq!(sharer.roots().len(), 1);
+    assert_eq!(
+        wait_terminated(&sharer, run_id).await,
+        vec![RootRunStatus::Committed]
+    );
     assert!(sharer.status().running);
 
     sharer.stop().await.unwrap();
@@ -494,7 +634,7 @@ async fn cancel_import_reports_unknown_runs() {
 
 #[test]
 #[cfg(windows)]
-fn unreadable_roots_fail_their_run_status_without_committing() {
+fn unreadable_roots_auto_remove_their_record_and_fail_the_banner_report() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -518,10 +658,20 @@ fn unreadable_roots_fail_their_run_status_without_committing() {
         let sharer = sharer_on("192.0.2.7");
         let started = sharer.import_paths(vec![root.clone()]).await;
         let run_id = started.run_id.expect("a folder drop starts a run");
+        // The record committed at drop — servable until the walk's
+        // outcome is known — and the share came up with it.
+        let committed_at_drop = sharer.roots().len() == 1;
+        let was_running = sharer.status().running;
         let statuses = wait_terminated(&sharer, run_id).await;
-        (statuses, sharer.status().running, sharer.roots().len())
+        (
+            statuses,
+            committed_at_drop,
+            was_running,
+            sharer.status().running,
+            sharer.roots().len(),
+        )
     });
-    let (statuses, running, roots) = result;
+    let (statuses, committed_at_drop, was_running, running, roots) = result;
 
     // Lift the denial before the temp dir is cleaned up.
     let reset = std::process::Command::new("icacls")
@@ -536,6 +686,12 @@ fn unreadable_roots_fail_their_run_status_without_committing() {
         RootRunStatus::Failed(_) => {}
         other => panic!("expected Failed, got {other:?}"),
     }
-    assert!(!running, "a failed import commits nothing, starts nothing");
+    // The drop committed the record and started the server; the failed
+    // walk auto-removed its own record (failed-add semantics keep their
+    // old meaning — nothing stands, reachable by removal now), and the
+    // emptied share stopped serving like any removal of the last content.
+    assert!(committed_at_drop);
+    assert!(was_running);
+    assert!(!running);
     assert_eq!(roots, 0);
 }

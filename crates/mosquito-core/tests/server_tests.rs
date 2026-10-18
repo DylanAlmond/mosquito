@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use mosquito_core::{AppState, FileId, FileStore, router};
+use mosquito_core::{AppState, FileId, FileStore, LanAddress, RootRunStatus, Sharer, router};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -1020,7 +1020,10 @@ async fn zip_download_merges_ids_and_node_addresses_into_one_archive() {
         entry_names(&mut archive),
         ["recipes.txt", "Photographs/notes/todo.txt"]
     );
-    assert_eq!(entry_content(&mut archive, "Photographs/notes/todo.txt"), "todo");
+    assert_eq!(
+        entry_content(&mut archive, "Photographs/notes/todo.txt"),
+        "todo"
+    );
     assert_eq!(entry_content(&mut archive, "recipes.txt"), "recipes");
 }
 
@@ -1178,4 +1181,101 @@ async fn download_removed_file_is_404() {
 
     let response = get(router(state), "/download/0").await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// -- live counts through an import (ADR-0008) -----------------------------
+
+/// Always reports loopback — the listing route is driven in-process.
+struct LocalLan;
+
+impl LanAddress for LocalLan {
+    fn local_ip(&self) -> std::io::Result<std::net::IpAddr> {
+        Ok("127.0.0.1".parse().unwrap())
+    }
+}
+
+/// The root row's live count as the receiver page renders it
+/// (`folder-count">N files<`).
+fn rendered_root_count(html: &str) -> u64 {
+    let marker = "class=\"folder-count\">";
+    let start = html
+        .find(marker)
+        .unwrap_or_else(|| panic!("no folder-count on the page: {html}"))
+        + marker.len();
+    let rest = &html[start..];
+    let end = rest
+        .find(" files<")
+        .unwrap_or_else(|| panic!("no count tail on the page: {html}"));
+    rest[..end].parse().unwrap()
+}
+
+/// Commit-at-drop puts the root row on the receiver's list immediately,
+/// and the walk's checkpoints surface as a climbing count — list_top
+/// renders per request, with no new machinery and no registration
+/// caused by the count (ADR-0008).
+#[tokio::test]
+async fn the_web_listing_shows_the_row_from_the_drop_and_the_count_climbs() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("Big");
+    std::fs::create_dir(&root).unwrap();
+    // Two checkpoints' worth of files, so the walk is going when this
+    // test first fetches the page.
+    for i in 0..1100 {
+        std::fs::write(root.join(format!("{i}.txt")), b"x").unwrap();
+    }
+
+    let store = Arc::new(Mutex::new(FileStore::new()));
+    let sharer = Sharer::with_lan(store.clone(), Box::new(LocalLan));
+    let app = router(AppState::new(store));
+
+    let started = sharer.import_paths(vec![root]).await;
+    let run_id = started.run_id.expect("a folder drop starts a run");
+
+    // The share came up in the drop's synchronous path: the receiver's
+    // page is being served while the count walk is still in flight.
+    assert!(sharer.status().running);
+
+    // Poll the page while the walk runs: the row is there every time —
+    // never even briefly a broken index — with the record's live number.
+    let mut seen: Vec<u64> = Vec::new();
+    let start = std::time::Instant::now();
+    loop {
+        let snapshot = sharer
+            .import_run_status()
+            .into_iter()
+            .find(|snapshot| snapshot.run_id == run_id)
+            .expect("the run is recorded in the registry");
+        let counting = snapshot.roots[0].status == RootRunStatus::Counting;
+
+        let html = body_text(get(app.clone(), "/").await).await;
+        seen.push(rendered_root_count(&html));
+
+        // The row renders the lazily-known group: no member registration
+        // ever leaked onto the page (display never registers).
+        assert_eq!(
+            html.matches("class=\"file-row\"").count(),
+            0,
+            "count leaked member rows: {html}"
+        );
+
+        if !counting {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "import never finished: {snapshot:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+
+    // The observed numbers are the walk's checkpoints: monotonic, within
+    // the folder's true total…
+    for pair in seen.windows(2) {
+        assert!(pair[1] >= pair[0], "the page's count only climbs: {seen:?}");
+        assert!(pair[1] <= 1100, "checkpoint overflow: {seen:?}");
+    }
+    // …converged to the walk total by the walk's end.
+    assert_eq!(seen.last().copied(), Some(1100));
+
+    sharer.stop().await.unwrap();
 }

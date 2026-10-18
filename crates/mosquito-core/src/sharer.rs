@@ -12,7 +12,8 @@ use crate::file_store::{
     RootRemoval, SharedFile,
 };
 use crate::import_run::{
-    CountFolderError, ImportRun, ImportRunSnapshot, ImportRuns, PROGRESS_EVERY_FILES, count_folder,
+    CountFolderError, ImportRun, ImportRunSnapshot, ImportRuns, PROGRESS_EVERY_FILES,
+    RootRunStatus, count_folder,
 };
 use crate::lan::{LanAddress, SystemLanAddress};
 use crate::server::{AppState, router};
@@ -190,9 +191,13 @@ impl Sharer {
     // -- import runs (ADR-0007) ------------------------------------------
 
     /// Begin an import of many paths: loose files register immediately
-    /// and synchronously; folder roots start background count walks that
-    /// commit root records when they finish. Progress and cancellation
-    /// are observable per run through [`Self::import_run_status`] and
+    /// and synchronously; folder roots commit their root record at drop
+    /// — synchronously, one brief lock, count 0 — and the server
+    /// auto-starts in the same synchronous path, so drop → server
+    /// listening is milliseconds, never gated by the walk (ADR-0008).
+    /// The walk then runs in the background, keeping the record's count
+    /// live at its checkpoints; progress and cancellation are observable
+    /// per run through [`Self::import_run_status`] and
     /// [`Self::cancel_import`].
     pub async fn import_paths(&self, paths: Vec<PathBuf>) -> ImportStartOutcome {
         let mut immediate = AddFilesOutcome {
@@ -222,18 +227,48 @@ impl Sharer {
                 };
                 let root_index = import.push_root(path.clone());
 
-                // One background count walk per root. The walk holds no
-                // lock; its commit later takes the store mutex briefly.
-                let context = ImportContext {
-                    store: Arc::clone(&self.store),
-                    state: Arc::clone(&self.state),
-                    lan: Arc::clone(&self.lan),
+                // Committed at drop (ADR-0008): one brief lock, count 0,
+                // before the walk starts. The walk's outcome decides
+                // whether the record stays — see [`live_count_walk`].
+                let root_id = {
+                    let context = ImportContext {
+                        store: Arc::clone(&self.store),
+                        state: Arc::clone(&self.state),
+                    };
+                    context
+                        .store
+                        .lock()
+                        .expect("file store not poisoned")
+                        .commit_root_record(&path, 0)
+                        .id
                 };
-                tokio::spawn(count_and_commit(
+
+                // The count is content — "dropping files IS the start
+                // button" — and the server comes up in the same
+                // synchronous path as the commit, ahead of the walk.
+                let running = matches!(
+                    &*self.state.lock().expect("server state not poisoned"),
+                    ServerState::Running { .. }
+                );
+                if !running {
+                    // A taken port falls back inside start_core; any
+                    // other failure surfaces through the server UI, as
+                    // when the user starts it themselves.
+                    let _ = self.start();
+                }
+
+                // One background count walk per root. The walk holds no
+                // lock across enumeration; each checkpoint takes the
+                // store mutex briefly.
+                tokio::spawn(live_count_walk(
                     Arc::clone(&import),
                     root_index,
                     path,
-                    context,
+                    root_id,
+                    ImportContext {
+                        store: Arc::clone(&self.store),
+                        state: Arc::clone(&self.state),
+                    },
                 ));
             } else {
                 match self
@@ -257,8 +292,10 @@ impl Sharer {
         }
     }
 
-    /// Cancel one run. Roots already committed stay committed; counting
-    /// roots stop early and leave no record. `false` = unknown run id.
+    /// Cancel one run. The outcome contract is removal (ADR-0008):
+    /// counting roots stop early and their records — committed at drop —
+    /// are removed, everything materialized under them with them; roots
+    /// already committed stay. `false` = unknown run id.
     pub fn cancel_import(&self, run_id: crate::import_run::RunId) -> bool {
         self.runs
             .lock()
@@ -302,23 +339,7 @@ impl Sharer {
     /// Stop sharing. Waits for the server task to finish, so when this
     /// returns, the port is genuinely released.
     pub async fn stop(&self) -> Result<(), SharerError> {
-        // Take the handles OUT of the lock, leaving Stopped behind.
-        // The lock is dropped before any .await — this extract-then-await
-        // pattern is how std::sync::Mutex and async code coexist safely.
-        let (shutdown, task) = {
-            let mut state = self.state.lock().expect("server state not poisoned");
-            match std::mem::replace(&mut *state, ServerState::Stopped) {
-                ServerState::Running { shutdown, task, .. } => (shutdown, task),
-                ServerState::Stopped => return Err(SharerError::NotRunning),
-            }
-        };
-
-        shutdown.cancel();
-        task.await
-            .map_err(SharerError::Join)?
-            .map_err(SharerError::Io)?;
-
-        Ok(())
+        shutdown(&self.state).await
     }
 
     /// Pure read of the current state.
@@ -428,76 +449,165 @@ fn start_core(
     Ok(info)
 }
 
-/// Everything a background count walk needs in order to commit its root
-/// record and bring the share up — owned outright, since it outlives the
-/// `Sharer` reference it was spawned from.
+/// Stop a server on bare state — the extract-then-await pattern the
+/// Sharer::stop path and the background removal path share: the lock
+/// never spans an `.await`, which is how std::sync::Mutex and async
+/// code coexist safely. `Sharer::stop` keeps its "stop without start is
+/// an error" contract; the background removal caller pre-checks
+/// `running` and swallows the impossible-by-timing `NotRunning`.
+async fn shutdown(state: &Arc<Mutex<ServerState>>) -> Result<(), SharerError> {
+    let (shutdown, task) = {
+        let mut state = state.lock().expect("server state not poisoned");
+        match std::mem::replace(&mut *state, ServerState::Stopped) {
+            ServerState::Running { shutdown, task, .. } => (shutdown, task),
+            ServerState::Stopped => return Err(SharerError::NotRunning),
+        }
+    };
+
+    shutdown.cancel();
+    task.await
+        .map_err(SharerError::Join)?
+        .map_err(SharerError::Io)?;
+
+    Ok(())
+}
+
+/// Everything a background count walk needs to keep its root record's
+/// count live and to act on the walk's outcome (ADR-0008) — owned
+/// outright, since it outlives the `Sharer` reference it was spawned
+/// from. The LAN address lives with the `Sharer`: the server auto-start
+/// happens in the drop's own synchronous path, not in the walk.
+#[derive(Clone)]
 struct ImportContext {
     store: Arc<Mutex<FileStore>>,
     state: Arc<Mutex<ServerState>>,
-    lan: Arc<dyn LanAddress>,
 }
 
-/// One root's background life: count without any lock, then commit the
-/// root record under a brief lock, then bring the share up if nothing
-/// is serving yet. A cancelled walk leaves no record; an unreadable
-/// root fails its status per the per-root tolerance rule.
-async fn count_and_commit(
+impl ImportContext {
+    /// The walk's checkpoint heartbeat (ADR-0008's live count): the run
+    /// board's per-root copy moves first, then the record's count under
+    /// one brief lock per checkpoint. Display only — no registration and
+    /// no materialization follows from it; a record that was already
+    /// removed (cancel, failure, the user's own removal) takes a late
+    /// checkpoint as a no-op.
+    fn checkpoint(&self, import: &ImportRun, root_index: usize, root_id: RootId, files: u64) {
+        import.set_files(root_index, files);
+        self.store
+            .lock()
+            .expect("file store not poisoned")
+            .update_root_count(root_id, files);
+    }
+
+    /// When a removal — cancellation or failure — empties the share (no
+    /// registered files and no root records left), the server stops, the
+    /// same rule a user's own removal of the last content triggers.
+    async fn stop_when_empty(&self) {
+        let empty = self
+            .store
+            .lock()
+            .expect("file store not poisoned")
+            .is_empty();
+        if empty {
+            let running = matches!(
+                &*self.state.lock().expect("server state not poisoned"),
+                ServerState::Running { .. }
+            );
+            if running {
+                let _ = shutdown(&self.state).await;
+            }
+        }
+    }
+
+    /// The walk-outcome removal (ADR-0008): the record plus everything
+    /// materialized under it goes in one sweep — the store's own
+    /// `remove_root`, the same action the user's delete uses — so the
+    /// cancelled/failed half-count leaves nothing behind even though the
+    /// drop committed the record. An already-removed record reports its
+    /// outcome to the run board all the same.
+    async fn remove_record(
+        &self,
+        import: &ImportRun,
+        root_index: usize,
+        id: RootId,
+        status: crate::import_run::RootRunStatus,
+    ) {
+        let _ = self
+            .store
+            .lock()
+            .expect("file store not poisoned")
+            .remove_root(id);
+        import.set_status(root_index, status);
+
+        self.stop_when_empty().await;
+    }
+}
+
+/// One root's background life (ADR-0008): record and server already
+/// exist from the synchronous drop path. The walk keeps the record's
+/// count live at its checkpoints without holding anything; its outcome
+/// decides whether the record stays — completion leaves the final
+/// number, cancellation and failure remove the record again.
+async fn live_count_walk(
     import: Arc<ImportRun>,
     root_index: usize,
     path: PathBuf,
+    root_id: RootId,
     context: ImportContext,
 ) {
     let counted = tokio::task::spawn_blocking({
         let import = Arc::clone(&import);
+        let context = context.clone();
         let count_path = path.clone();
         move || {
             count_folder(
                 &count_path,
                 &|| import.is_cancelled(),
                 PROGRESS_EVERY_FILES,
-                &mut |files| import.set_files(root_index, files),
+                &mut |files| context.checkpoint(&import, root_index, root_id, files),
             )
         }
     })
     .await;
 
     match counted {
-        Ok(Ok(total)) => {
-            // A cancellation may land between the walk's last poll and
-            // here: re-check before committing, so a cancelled root
-            // leaves no record even when the count itself finished.
+        Ok(Ok(_total)) => {
+            // The completion heartbeat already left the final count on
+            // the record. A cancellation may still land between the
+            // walk's last poll and here: re-check before keeping the
+            // record — a cancelled root's outcome is removal, even when
+            // the count itself finished.
             if import.is_cancelled() {
-                import.set_status(root_index, crate::import_run::RootRunStatus::Cancelled);
+                context
+                    .remove_record(&import, root_index, root_id, RootRunStatus::Cancelled)
+                    .await;
                 return;
             }
-            // Brief lock: the store accepts one record and is dropped
-            // before anything else happens (the no-await-across-lock rule).
-            context
-                .store
-                .lock()
-                .expect("file store not poisoned")
-                .commit_root_record(&path, total);
-            import.set_status(root_index, crate::import_run::RootRunStatus::Committed);
-
-            // The count is content — "dropping files IS the start button",
-            // even when the commit lands long after the drop.
-            let running = matches!(
-                &*context.state.lock().expect("server state not poisoned"),
-                ServerState::Running { .. }
-            );
-            if !running {
-                let _ = start_core(&context.store, &context.state, &context.lan, DEFAULT_PORT);
-            }
+            import.set_status(root_index, RootRunStatus::Committed);
         }
         Ok(Err(CountFolderError::Cancelled)) => {
-            import.set_status(root_index, crate::import_run::RootRunStatus::Cancelled)
+            context
+                .remove_record(&import, root_index, root_id, RootRunStatus::Cancelled)
+                .await
         }
         Ok(Err(CountFolderError::Unreadable(error))) => {
-            import.set_status(root_index, crate::import_run::RootRunStatus::Failed(error))
+            // Failed-add semantics keep exactly their old meaning — no
+            // record stands, the failure surfaces once through the run
+            // board's banner flow — reached now by removal.
+            context
+                .remove_record(&import, root_index, root_id, RootRunStatus::Failed(error))
+                .await
         }
-        Err(join) => import.set_status(
-            root_index,
-            crate::import_run::RootRunStatus::Failed(join.to_string()),
-        ),
+        // The walk task itself died — that is a bug, but leaving a stuck
+        // zero-count record with no walk would live-count forever.
+        Err(join) => {
+            context
+                .remove_record(
+                    &import,
+                    root_index,
+                    root_id,
+                    RootRunStatus::Failed(join.to_string()),
+                )
+                .await
+        }
     }
 }

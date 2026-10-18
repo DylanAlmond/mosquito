@@ -82,6 +82,26 @@ async function refresh() {
   contentVersion.value += 1;
 }
 
+/// The counting tick's lighter read (ADR-0008): the top listing plus a
+/// pure server-info read, refreshed while any root's walk is still
+/// running — records commit at drop, so their rows and their climbing
+/// counts surface from here. `contentVersion` deliberately stays put:
+/// count updates register nothing, so expanded paged nodes have no
+/// reason to refetch; settled runs and actions re-truth them through
+/// [`refresh`].
+async function refreshTop() {
+  const top = await invoke<TopListing>('list_top');
+  loose.value = top.loose;
+  roots.value = top.roots;
+  info.value = await invoke<ServerInfo>('get_server_info');
+  // First time the drop's auto-start shows through, hand the share panel
+  // its QR — the settle refresh would otherwise hold it until the walk
+  // ends. Runs once per rise, so the tick stays bounded and cheap.
+  if (info.value.running && qrSvg.value === null) {
+    qrSvg.value = await invoke<string>('get_qr');
+  }
+}
+
 function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
@@ -97,9 +117,11 @@ function startPolling() {
 
 /// One tick of run observation: refresh snapshots, surface root failures
 /// through the failed-add banner (the existing import-scoped flow), and
-/// when nothing is counting anymore, fold the run board away and refresh
-/// the share view — committed root records and a server the backend
-/// auto-started on commit only surface from here.
+/// while anything is still counting, re-read the top listing so the
+/// committed-at-drop rows show up and their live counts climb (ADR-0008).
+/// When nothing is counting anymore, fold the run board away and do the
+/// full refresh — settled runs, and the QR once the share is definitely
+/// up (it went up at drop).
 async function pollRuns() {
   runs.value = await invoke<ImportRunSnapshot[]>('import_runs');
 
@@ -117,6 +139,7 @@ async function pollRuns() {
 
   if (runs.value.some((run) => countingRoots(run).length > 0)) {
     startPolling();
+    await refreshTop();
     return;
   }
 
@@ -149,9 +172,10 @@ export function useSharer() {
     await guard(refresh);
   }
 
-  /// Import many paths: loose files register immediately, folders become
-  /// background import runs committing lazily-known root records
-  /// (ADR-0005/0007) whose progress shows on the board.
+  /// Import many paths: loose files register immediately; folders commit
+  /// their root records at drop (ADR-0008) and the backend starts the
+  /// server in that same synchronous path — the walk only keeps the
+  /// records' counts live, its progress showing on the board.
   async function addPaths(paths: string[]) {
     await guard(async () => {
       failedAdds.value = [];
@@ -163,10 +187,10 @@ export function useSharer() {
 
       if (outcome.run_id !== null) await pollRuns();
 
-      // Product rule: the server runs whenever there's something to
-      // share. Dropping files IS the start button. Folder-only drops
-      // wait for the backend to auto-start the server when the first
-      // root commits.
+      // Loose adds are still the frontend's to start (the backend only
+      // auto-starts on a folder drop, ADR-0008); a folder drop's server
+      // is already listening, so this guard skips it — info is current
+      // because pollRuns' ticks re-read the server state.
       if (outcome.immediate.added.length > 0 && !info.value.running) {
         await invoke<ServerInfo>('start_server');
       }
@@ -175,8 +199,10 @@ export function useSharer() {
     });
   }
 
-  /// Ask a run to stop. Roots already committed stay committed; roots
-  /// still counting leave no record (ADR-0007).
+  /// Ask a run to stop. The outcome contract is removal (ADR-0008):
+  /// counting roots have their committed-at-drop records removed,
+  /// everything materialized under them with them; roots already
+  /// committed stay.
   async function cancelRun(runId: number) {
     await guard(async () => {
       await invoke<boolean>('cancel_import', { runId });
