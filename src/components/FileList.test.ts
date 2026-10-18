@@ -351,4 +351,18 @@ describe('FileList', () => {
     expect(folderRow(wrapper, 'Docs')).toBeUndefined();
     expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'vacation']);
   });
+
+  it('removals never stop the server themselves — that is the backend auto-stop rule (ADR-0007)', async () => {
+    sharedFiles = [loose(2, 'notes.txt'), loose(5, 'moar.txt')];
+    useSharer().files.value = sharedFiles;
+    useSharer().info.value = { running: true, url: 'http://10.0.0.2:7331', port: 7331, lan_ip: '10.0.0.2' };
+    const wrapper = mountList();
+
+    await wrapper.find('[aria-label="Select all shared files"]').trigger('click');
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('stop_server');
+  });
 });

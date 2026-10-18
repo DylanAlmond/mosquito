@@ -1,20 +1,28 @@
 <script setup lang="ts">
 import { open, type OpenDialogOptions } from '@tauri-apps/plugin-dialog';
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import ChevronIcon from '../assets/chevron-compact-up.svg';
 import CopyIcon from '../assets/copy.svg';
 import CopiedIcon from '../assets/square-rounded-check.svg';
 import ChooseSection from './ChooseSection.vue';
 import FileList from './FileList.vue';
 import { useDragDrop } from '../composables/useDragDrop';
-import { useSharer } from '../composables/useSharer';
+import { countingRoots, useSharer } from '../composables/useSharer';
 
-const { files, info, qrSvg, busy, addPaths } = useSharer();
+const { files, info, qrSvg, runs, addPaths, cancelRun } = useSharer();
 const { dragging } = useDragDrop(addPaths);
 
 const copied = ref(false);
 const selecting = ref(false);
 const filesExpanded = ref(false);
+
+/// Roots still walking, per run — the progress board only shows in-flight
+/// counting, never settled runs (ADR-0007: coarse per-root progress).
+const activeRuns = computed(() =>
+  runs.value
+    .map((run) => ({ runId: run.run_id, counting: countingRoots(run) }))
+    .filter((run) => run.counting.length > 0)
+);
 
 watch(
   () => info.value.running,
@@ -23,9 +31,11 @@ watch(
   }
 );
 
-// One guarded dialog flow; a picker can't stack while one is already open.
+// One dialog flow at a time (a picker can't stack); everything else —
+// picks, drops while a run is counting, removals — is allowed to
+// overlap: further drops just become further import runs (ADR-0007).
 async function pick(options: OpenDialogOptions) {
-  if (busy.value || selecting.value) return;
+  if (selecting.value) return;
 
   selecting.value = true;
   try {
@@ -62,15 +72,15 @@ async function copyUrl() {
       class="dropzone"
       :class="{ 'is-dragging': dragging }"
       type="button"
-      :disabled="busy || selecting"
-      :aria-busy="busy || selecting"
+      :disabled="selecting"
+      :aria-busy="selecting"
       @click="chooseFiles"
     >
       <span class="drop-title">Drop files or folders here</span>
     </button>
 
     <ChooseSection
-      :disabled="busy || selecting"
+      :disabled="selecting"
       @choose-files="chooseFiles"
       @choose-folder="chooseFolder"
     />
@@ -81,7 +91,7 @@ async function copyUrl() {
       class="dropzone dropzone--active"
       :class="{ 'is-dragging': dragging }"
       aria-label="Network sharing details"
-      :aria-busy="busy || selecting"
+      :aria-busy="selecting"
       @click="chooseFiles"
     >
       <h2>Sharing to your network</h2>
@@ -92,7 +102,7 @@ async function copyUrl() {
         type="button"
         :aria-label="copied ? 'Share URL copied' : 'Copy share URL'"
         :title="copied ? 'Copied' : 'Copy share URL'"
-        :disabled="busy || selecting"
+        :disabled="selecting"
         class="url-row"
         @click.stop="copyUrl"
       >
@@ -108,7 +118,7 @@ async function copyUrl() {
     </section>
 
     <ChooseSection
-      :disabled="busy || selecting"
+      :disabled="selecting"
       @choose-files="chooseFiles"
       @choose-folder="chooseFolder"
     />
@@ -129,6 +139,25 @@ async function copyUrl() {
     >
       <ChevronIcon class="icon" :class="{ 'is-collapsed': !filesExpanded }" />
     </button>
+  </template>
+
+  <template v-if="activeRuns.length">
+    <section class="import-runs" aria-label="Import progress">
+      <div v-for="run in activeRuns" :key="run.runId" class="import-run">
+        <p v-for="root in run.counting" :key="root.path" class="import-row">
+          counting <code>{{ root.path }}</code> — {{ root.files }} entries
+        </p>
+
+        <button
+          type="button"
+          class="cancel"
+          :aria-label="`Cancel import of ${run.counting.map((root) => root.path).join(', ')}`"
+          @click="cancelRun(run.runId)"
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
   </template>
 </template>
 
@@ -167,6 +196,46 @@ async function copyUrl() {
   margin: 0;
   font-size: 1.25rem;
   text-align: center;
+}
+
+.import-runs {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.import-run {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.import-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 14px;
+  width: 100%;
+
+  border: 2px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.8125rem;
+  line-height: 1.3;
+}
+
+.import-row code {
+  word-break: break-all;
+  user-select: text;
+}
+
+.cancel {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-decoration: underline;
 }
 
 .qr {

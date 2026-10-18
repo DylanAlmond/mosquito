@@ -24,6 +24,27 @@ export interface AddFilesOutcome {
   failed: FailedAdd[];
 }
 
+export type RootRunStatus = 'Counting' | 'Committed' | 'Cancelled' | { Failed: string };
+
+export interface RootRun {
+  /** Absolute path of the folder being counted. */
+  path: string;
+  /** Files counted so far. */
+  files: number;
+  status: RootRunStatus;
+}
+
+export interface ImportRunSnapshot {
+  run_id: number;
+  roots: RootRun[];
+}
+
+export interface ImportStartOutcome {
+  /** The background run counting the drop's folders, or null for loose files only. */
+  run_id: number | null;
+  immediate: AddFilesOutcome;
+}
+
 export interface ServerInfo {
   running: boolean;
   url: string | null;

@@ -1,15 +1,21 @@
-# Desktop UI harness sweep (issues #7 and #8): one pass over the real
+# Desktop UI harness sweep (issues #7, #8, #23): one pass over the real
 # dev build against the fixtures seeded via `tauri-pilot ipc
 # harness_seed` (deterministic temp tree: two loose files + the
-# `Photographs` folder with a direct member and a nested one) — see
-# `harness/desktop/run.mjs`.
+# `Photographs` folder) — see `harness/desktop/run.mjs`.
 #
-# Drives the folder tree (expand/collapse via chevrons, default states,
-# subtree selection reaching folded members), selection, and bulk
-# removal. Targets are CSS attribute selectors, not snapshot refs: refs
-# reset on every snapshot and scenarios have no snapshot step.
-# Screenshots land in `test-results/desktop-harness/`; failure shots go
-# to the `--screenshots-dir` the driver passes.
+# The seed flows through the production import-run path (ADR-0007): the
+# loose files register immediately; `Photographs` is counted by a
+# background import run and commits a root record — with no rows here,
+# because the desktop list browses root records only from #24 onward.
+# The sweep therefore exercises the loose rows (rendering, selection,
+# bulk removal) and the empty-list return; the folder import itself is
+# validated by the count walk in the core suite plus the progress board
+# in the SharePanel unit tests.
+#
+# Targets are CSS attribute selectors, not snapshot refs: refs reset on
+# every snapshot and scenarios have no snapshot step. Screenshots land
+# in `test-results/desktop-harness/`; failure shots go to the
+# `--screenshots-dir` the driver passes.
 
 [[step]]
 name = "the shared-files panel appears once the fixture seed drained"
@@ -40,17 +46,14 @@ selector = ".file-rows"
 stable = 250
 
 [[step]]
-name = "the Photographs folder row is expandable and starts expanded"
-action = "assert-exists"
-target = '[aria-label="Collapse Photographs"]'
+name = "the fixture folder's import run has settled"
+action = "wait"
+selector = '[aria-label="Import progress"]'
+gone = true
+timeout_ms = 60000
 
 [[step]]
-name = "the nested travel subfolder starts collapsed"
-action = "assert-exists"
-target = '[aria-label="Expand travel"]'
-
-[[step]]
-name = "loose files got their row checkboxes"
+name = "the loose files got their row checkboxes"
 action = "assert-exists"
 target = '[aria-label="Select beach-notes.txt"]'
 
@@ -60,99 +63,20 @@ action = "assert-exists"
 target = '[aria-label="Select release-plan.md"]'
 
 [[step]]
-name = "the direct folder member keeps its row"
-action = "assert-exists"
-target = '[aria-label="Select sunrise.jpg"]'
-
-[[step]]
-name = "two loose files plus the direct member are listed — the nested member stays folded"
+name = "the imported folder contributes no rows yet — root records browse from #24"
 action = "assert-count"
 selector = ".file-row"
-expected = 3
+expected = 2
 
 [[step]]
-name = "the expanded root paints its region with the shared shade"
-action = "assert-exists"
-target = ".folder-row.shade-1"
-
-[[step]]
-name = "the direct member sits inside the shaded region"
-action = "assert-exists"
-target = '.file-row.shade-1 [aria-label="Select sunrise.jpg"]'
-
-[[step]]
-name = "loose files stay on the plain surface"
-action = "assert-exists"
-target = '.file-row:not(.shade-1) [aria-label="Select beach-notes.txt"]'
-
-[[step]]
-name = "expand the nested subfolder"
+name = "select the first loose file"
 action = "click"
-target = '[aria-label="Expand travel"]'
+target = '[aria-label="Select beach-notes.txt"]'
 
 [[step]]
-name = "the nested member appears under its subfolder"
-action = "assert-count"
-selector = ".file-row"
-expected = 4
-
-[[step]]
-name = "the folded member joins the list"
+name = "the selection highlights the row"
 action = "assert-exists"
-target = '[aria-label="Select beach.jpg"]'
-
-[[step]]
-name = "the nested region alternates back to the plain surface"
-action = "assert-exists"
-target = '.file-row:not(.shade-1) [aria-label="Select beach.jpg"]'
-
-[[step]]
-name = "capture the expanded tree"
-action = "screenshot"
-path = "test-results/desktop-harness/folder-tree.png"
-selector = ".file-table"
-
-[[step]]
-name = "fold the nested subfolder back"
-action = "click"
-target = '[aria-label="Collapse travel"]'
-
-[[step]]
-name = "the collapsed content is gone while the tree keeps its shape"
-action = "assert-count"
-selector = ".file-row"
-expected = 3
-
-[[step]]
-name = "toggling the folder selects its whole subtree"
-action = "click"
-target = '[aria-label="Select or deselect all files in Photographs"]'
-
-[[step]]
-name = "the visible member highlights"
-action = "assert-exists"
-target = '[aria-label="Deselect sunrise.jpg"]'
-
-[[step]]
-name = "deselect the visible member"
-action = "click"
-target = '[aria-label="Deselect sunrise.jpg"]'
-
-[[step]]
-name = "the folded member still counts: the folder reads partial select"
-action = "assert-exists"
-target = '[aria-label="Select or deselect all files in Photographs"][aria-checked="mixed"]'
-
-[[step]]
-name = "capture the subtree-selection state"
-action = "screenshot"
-path = "test-results/desktop-harness/subtree-selection.png"
-selector = ".file-table"
-
-[[step]]
-name = "reselect the whole subtree"
-action = "click"
-target = '[aria-label="Select or deselect all files in Photographs"]'
+target = '[aria-label="Deselect beach-notes.txt"]'
 
 [[step]]
 name = "select all shared files"
@@ -160,10 +84,10 @@ action = "click"
 target = '[aria-label="Select all shared files"]'
 
 [[step]]
-name = "the visible rows highlight (the folded member is selected too)"
+name = "every loose row highlights"
 action = "assert-count"
 selector = ".file-row.is-selected"
-expected = 3
+expected = 2
 
 [[step]]
 name = "capture the select-all state"
@@ -177,19 +101,18 @@ action = "click"
 target = '[aria-label="Delete selected files"]'
 
 [[step]]
-name = "the empty list unmounts once nothing is shared"
+name = "the empty list unmounts once the files are gone"
 action = "wait"
 selector = ".file-table"
 gone = true
 timeout_ms = 30000
 
 [[step]]
-name = "the dropzone is back"
-action = "assert-text"
-target = ".drop-title"
-expected = "Drop files or folders here"
+name = "the imported folder still counts as shared, so the card stays up"
+action = "assert-exists"
+target = ".dropzone--active"
 
 [[step]]
 name = "final state"
 action = "screenshot"
-path = "test-results/desktop-harness/after-bulk-removal.png"
+path = "test-results/desktop-harness/after-removal.png"
