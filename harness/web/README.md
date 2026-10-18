@@ -49,7 +49,7 @@ markup, so the served page can change without harness breakage:
 | `[aria-expanded="true"]` / `[aria-expanded="false"]` | a folder's expansion state, seated by the server's five-children stamp and re-derived by the fragment's `aria-expanded` rows |
 | `[data-shade]` / `[data-shade="1"]` / `[data-shade="0"]` | the grey-region shade attribute, alternating per nesting level; `1` = shaded grey, `0` = plain surface |
 | `.materialize-marker` | a node's inline materialization-failure marker (ADR-0005): a count only, no failing paths |
-| `button[data-select="<id>"]` | a per-file checkbox (`aria-checked` `false`/`true`; hidden until the script runs) |
+| `button[data-select="<id>"]` | a per-file checkbox (`aria-checked` `false`/`true`; hidden until the script runs; **disabled** while an ancestor folder's node selection covers it — see below) |
 | `button[data-node-select]` | a folder row's node checkbox (hidden until the script runs) — selects the node's whole subtree by address, never member file ids; aria state is `false`/`true`/`mixed`, mirroring the desktop root checkbox: checked only while the node itself is selected, mixed when some rendered member (picked file row or picked subfolder) participates |
 | `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) — covers exactly the rendered file rows plus every root's node selection, so an expansion makes it drop to `mixed` until re-clicked |
 | `#download-selected` / `#download-selected.is-visible` | icon-only download button, invisible until something is selected; `href` is `/download/<id>` for one file, `/download/zip/node/<id>?sub=<sub>` for one node, `/download/zip?ids=<ids>&nodes=<nodes>` for anything else — node addresses arrive as `nodes=<root_id>:<sub>,…` with the sub percent-encoded per address |
@@ -63,6 +63,14 @@ individual file id (`data-select`); folder rows select by node address
 never materializes anything, a folder selection survives its row being
 collapsed by a parent, and a mixed selection (ids + node addresses)
 downloads as one merged archive.
+
+And the group's tick reaches the rows it covers: while an ancestor
+folder's node selection covers a rendered row, that row shows the
+selection and its own checkbox goes **disabled** — node selections
+have no member exclusions, so the covering folder is the way to change
+the scope. The covered state derives from the flat row ancestry
+(preceding rows of strictly-shallower depth) and mirrors the desktop's
+`FileList.vue`.
 
 Rows a fragment's fetch adds render only when their ancestors are
 expanded (collapse **removes** them from the DOM); tests assert that

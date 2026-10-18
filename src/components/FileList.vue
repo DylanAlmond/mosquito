@@ -318,10 +318,30 @@ function isSelected(id: number) {
   return selectedIds.value.includes(id);
 }
 
+/// Whether a root group's whole pick covers a file row: the group owns
+/// its subtree until it is unchecked (ADR-0006 — selection resolves
+/// through the node), so a covered member shows the tick and its own
+/// checkbox goes inert — flipping a covered member off isn't
+/// representable (there are no exclusions to a node selection); the
+/// group checkbox is the way to label finer intent. Loose files have no
+/// owner and are never covered.
+function ownerGroupSelected(id: number): boolean {
+  const owner = fileOwnerRoot.value.get(id);
+  return owner !== undefined && selectedRootIds.value.includes(owner);
+}
+
+/// The tick a rendered file row shows: its own pick, or the group's
+/// whole pick over it.
+function rowSelected(id: number): boolean {
+  return isSelected(id) || ownerGroupSelected(id);
+}
+
+/// Toggle one member's own pick — covered members are inert: the click
+/// reaches here through the whole row too, not only the checkbox.
 function toggleFile(id: number) {
   if (isSelected(id)) {
     selectedIds.value = selectedIds.value.filter((selectedId) => selectedId !== id);
-  } else {
+  } else if (!ownerGroupSelected(id)) {
     selectedIds.value = [...selectedIds.value, id];
   }
 }
@@ -569,23 +589,23 @@ function folderCountText(count: number | undefined) {
         <li
           v-else-if="row.kind === 'file'"
           class="file-row"
-          :class="{ 'is-selected': isSelected(row.file.id), 'shade-1': row.shade === 1 }"
+          :class="{ 'is-selected': rowSelected(row.file.id), 'shade-1': row.shade === 1 }"
           :title="row.file.path"
           :style="row.rootId !== null ? { '--depth': String(row.depth) } : undefined"
           :data-depth="row.rootId !== null ? String(row.depth) : undefined"
           role="row"
-          :aria-selected="isSelected(row.file.id)"
+          :aria-selected="rowSelected(row.file.id)"
           @click="toggleFile(row.file.id)"
         >
           <button
             type="button"
             role="checkbox"
-            :aria-checked="isSelected(row.file.id)"
+            :aria-checked="rowSelected(row.file.id)"
             :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${row.file.name}`"
-            :disabled="busy"
+            :disabled="busy || ownerGroupSelected(row.file.id)"
             @click.stop="toggleFile(row.file.id)"
           >
-            <CheckedIcon v-if="isSelected(row.file.id)" />
+            <CheckedIcon v-if="rowSelected(row.file.id)" />
             <UncheckedIcon v-else />
           </button>
 

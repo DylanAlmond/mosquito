@@ -189,11 +189,20 @@ test('folder checkboxes select node subtrees beside the rendered files', async (
   await expect(page.locator('.folder-row .checkbox-spacer')).toHaveCount(0);
 
   // Checking the root selects the node (root record id + sub path) —
-  // no rendered member joins it, and a single-node selection links
-  // the node route directly.
+  // no rendered member's id joins the payload, but the group's tick
+  // reaches its rendered descendants on the selection's behalf: the
+  // member row shows the state and every descendant checkbox stands
+  // down — the covering folder owns it until it is unchecked (the
+  // desktop group rule, carried over). A single-node selection still
+  // links the node route directly.
   await rootBox.click();
   await expect(rootBox).toHaveAttribute('aria-checked', 'true');
-  await expect(page.locator('.file-row.is-selected')).toHaveCount(0);
+  await expect(page.locator('.file-row.is-selected')).toHaveCount(1);
+  const memberBox = page.locator('button[data-select="2"]');
+  await expect(memberBox).toHaveAttribute('aria-checked', 'true');
+  await expect(memberBox).toBeDisabled();
+  await expect(notesBox).toHaveAttribute('aria-checked', 'true');
+  await expect(notesBox).toBeDisabled();
   await expect(page.locator('#select-all')).toHaveAttribute(
     'aria-checked',
     'mixed'
@@ -204,23 +213,30 @@ test('folder checkboxes select node subtrees beside the rendered files', async (
   );
 
   // Unchecking owns its subtree before anything else happened —
-  // nothing else to drop, the selection empties.
+  // nothing else to drop, the selection empties and the covered rows
+  // wake back up.
   await rootBox.click();
   await expect(rootBox).toHaveAttribute('aria-checked', 'false');
+  await expect(memberBox).toHaveAttribute('aria-checked', 'false');
+  await expect(memberBox).toBeEnabled();
+  await expect(notesBox).toHaveAttribute('aria-checked', 'false');
+  await expect(notesBox).toBeEnabled();
   await expect(downloadSelected).not.toHaveClass(/is-visible/);
   await expect(downloadSelected).toHaveAttribute('href', '/download/zip');
 
   // A picked rendered member alone turns the node mixed — the
   // member pick never checks the node (the rule runs both ways).
-  await page.locator('button[data-select="2"]').click();
+  await memberBox.click();
   await expect(rootBox).toHaveAttribute('aria-checked', 'mixed');
   await expect(downloadSelected).toHaveAttribute('href', '/download/2');
 
   // Checking the node now merges both payload forms into one archive;
-  // the node's own selection wins its state, the member pick stays.
+  // the node's own selection wins its state, the member pick stays —
+  // and the rendered member is covered now, so its box goes inert.
   await rootBox.click();
   await expect(rootBox).toHaveAttribute('aria-checked', 'true');
   await expect(page.locator('.file-row.is-selected')).toHaveCount(1);
+  await expect(memberBox).toBeDisabled();
   await expect(downloadSelected).toHaveAttribute(
     'href',
     '/download/zip?ids=2&nodes=0:'
@@ -248,6 +264,7 @@ test('folder checkboxes select node subtrees beside the rendered files', async (
   // wins over member participation), so both node addresses merge.
   await rootBox.click();
   await expect(rootBox).toHaveAttribute('aria-checked', 'true');
+  await expect(notesBox).toBeDisabled();
   await expect(downloadSelected).toHaveAttribute(
     'href',
     '/download/zip?nodes=0:notes,0:'

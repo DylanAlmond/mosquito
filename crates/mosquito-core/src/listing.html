@@ -66,7 +66,7 @@
       button:not(:disabled) {
         cursor: pointer;
       }
-      button:hover {
+      button:not(:disabled):hover {
         opacity: 0.5;
       }
       button svg {
@@ -437,14 +437,45 @@
           return row.dataset.nodeRoot + ':' + row.dataset.nodeSub;
         }
 
+        // Whether an ancestor folder's node selection covers a row: a
+        // folder row's ancestors are exactly the preceding rows of
+        // strictly-shallower depth, tightened as each shallower row is
+        // met (rows between ancestors are members, not ancestors). The
+        // group rule comes with it: a covered row shows the tick and
+        // its own checkbox goes inert, like the desktop's (FileList.vue)
+        // — node selections have no member exclusions, so flipping a
+        // covered member off isn't representable; the covering folder
+        // is the way to change the scope. Loose rows carry no depth and
+        // are never covered.
+        function coveredByAncestor(row) {
+          if (row.dataset.depth === undefined) return false;
+          var depth = Number(row.dataset.depth);
+          var prev = row.previousElementSibling;
+          while (prev && prev.dataset.depth !== undefined) {
+            var shallower = Number(prev.dataset.depth);
+            if (shallower < depth) {
+              if (
+                prev.classList.contains('folder-row') &&
+                selectedNodes[nodeAddress(prev)] === true
+              ) {
+                return true;
+              }
+              depth = shallower;
+            }
+            prev = prev.previousElementSibling;
+          }
+          return false;
+        }
+
         // One folder checkbox's state (the desktop group rule, carried
         // to subfolders, issue #27): true when the node itself is
-        // selected, mixed when some rendered member participates — a
-        // picked file row, or a picked subfolder within — false
-        // otherwise. Member picks and node picks never turn each other
-        // on; the state only ever mirrors the selection.
+        // selected or an ancestor's selection covers it, mixed when
+        // some rendered member participates on its own — a picked file
+        // row, or a picked subfolder within — false otherwise. Member
+        // picks and node picks never turn each other on; the state
+        // only ever mirrors the selection.
         function folderState(row) {
-          if (selectedNodes[nodeAddress(row)]) return true;
+          if (selectedNodes[nodeAddress(row)] || coveredByAncestor(row)) return true;
           var depth = Number(row.dataset.depth);
           var member = row.nextElementSibling;
           while (
@@ -537,7 +568,12 @@
             list.querySelectorAll('[data-select]'),
             function (checkbox) {
               checkbox.hidden = false;
-              setBox(selected[checkbox.dataset.select] === true, checkbox);
+              var covered = coveredByAncestor(checkbox.closest('.file-row'));
+              // A covered member shows the tick on the selection's
+              // behalf and stands down — the covering folder owns it
+              // until it is unchecked (the desktop group rule).
+              checkbox.disabled = covered;
+              setBox(covered || selected[checkbox.dataset.select] === true, checkbox);
               fileIds.push(checkbox.dataset.select);
             }
           );
@@ -557,7 +593,9 @@
             list.querySelectorAll('[data-node-select]'),
             function (checkbox) {
               checkbox.hidden = false;
-              setBox(folderState(checkbox.closest('.folder-row')), checkbox);
+              var row = checkbox.closest('.folder-row');
+              checkbox.disabled = coveredByAncestor(row);
+              setBox(folderState(row), checkbox);
             }
           );
 

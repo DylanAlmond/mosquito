@@ -446,6 +446,49 @@ describe('FileList (paged feed)', () => {
     expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
   });
 
+  it('a checked group ticks its rendered members at every depth; covered members are inert', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    await folderRow(wrapper, 'Photos')!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+
+    // Every rendered member row under the group carries its tick…
+    const memberRows = wrapper.findAll('.file-row.is-selected');
+    expect(memberRows.map((row) => row.find('.file-name').text())).toEqual([
+      'beach.jpg',
+      'dune.jpg',
+      'shore.jpg'
+    ]);
+    // …and each member's checkbox stands down: the group owns the
+    // subtree until it is unchecked (selection resolves through the
+    // node — flipping one member off isn't representable).
+    memberRows.forEach((row) => {
+      const checkbox = row.find('[role="checkbox"]');
+      expect(checkbox.attributes('aria-checked')).toBe('true');
+      expect(checkbox.attributes('disabled')).toBeDefined();
+    });
+
+    // A click on a covered member — through the row or the checkbox —
+    // changes nothing.
+    await memberRows[0]!.trigger('click');
+    await memberRows[1]!.find('[role="checkbox"]').trigger('click');
+    expect(folderRow(wrapper, 'Photos')!.find('[aria-checked]').attributes('aria-checked')).toBe(
+      'true'
+    );
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(3);
+
+    // Unchecking the group releases the members: ticks gone, and their
+    // checkboxes wake back up (nothing else was covered).
+    await folderRow(wrapper, 'Photos')!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+    expect(wrapper.findAll('.file-row [role="checkbox"][disabled]')).toHaveLength(0);
+  });
+
   it('delete selected splits mixed selections: groups through remove_root, stray loose ids through remove_file', async () => {
     const wrapper = mounted();
 
