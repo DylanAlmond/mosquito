@@ -172,161 +172,160 @@ pub fn build_folder_tree(files: &[SharedFile]) -> FolderTree<'_> {
 mod tests {
     use super::*;
     use crate::file_store::{FileId, FolderProvenance};
+    use serde::Deserialize;
 
-    fn shared_file(id: u64, name: &str, provenance: Option<FolderProvenance>) -> SharedFile {
-        SharedFile {
-            id: FileId(id),
-            name: name.into(),
-            path: PathBuf::from(format!("C:\\nowhere\\{name}")),
-            size: 1,
-            provenance,
-        }
+    /// The one fixture both folder-tree mirrors' tests read (ADR-0002):
+    /// this module and the TypeScript test in
+    /// `src/lib/folderTree.test.ts` must each derive the fixture's
+    /// outline from its input list exactly. The former hand-maintained
+    /// case lists are replaced by it — every rule they pinned (loose
+    /// files, files before subfolders, first-appearance ordering,
+    /// arbitrary depth, duplicates at the same spot, same-named roots
+    /// and subfolders, root naming splitting on either separator) is
+    /// encoded in the fixture.
+    const FIXTURE: &str = "test/fixtures/folder-tree/tree-input-and-outline.json";
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        #[allow(dead_code)]
+        notes: Vec<String>,
+        input: Vec<FixtureEntry>,
+        outline: Outline,
     }
 
-    fn loose(id: u64, name: &str) -> SharedFile {
-        shared_file(id, name, None)
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FixtureEntry {
+        id: u64,
+        name: String,
+        path: String,
+        size: u64,
+        provenance: Option<FixtureProvenance>,
     }
 
-    fn member(id: u64, root: &str, relative_path: &str) -> SharedFile {
-        shared_file(
-            id,
-            relative_path.rsplit('/').next().unwrap_or(relative_path),
-            Some(FolderProvenance {
-                folder_root: PathBuf::from(root),
-                relative_path: relative_path.into(),
-            }),
-        )
+    #[derive(Deserialize)]
+    struct FixtureProvenance {
+        folder_root: String,
+        relative_path: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Outline {
+        loose: Vec<u64>,
+        roots: Vec<OutlineNode>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OutlineNode {
+        name: String,
+        folder_root: String,
+        sub_path: String,
+        depth: usize,
+        files: Vec<u64>,
+        children: Vec<OutlineNode>,
+    }
+
+    fn fixture() -> Fixture {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/fixtures/folder-tree/tree-input-and-outline.json"
+        )))
+        .expect("the shared fixture must parse as JSON")
+    }
+
+    fn shared_files(fixture: &Fixture) -> Vec<SharedFile> {
+        fixture
+            .input
+            .iter()
+            .map(|entry| SharedFile {
+                id: FileId(entry.id),
+                name: entry.name.clone(),
+                path: PathBuf::from(&entry.path),
+                size: entry.size,
+                provenance: entry.provenance.as_ref().map(|provenance| FolderProvenance {
+                    folder_root: PathBuf::from(&provenance.folder_root),
+                    relative_path: provenance.relative_path.clone(),
+                }),
+            })
+            .collect()
     }
 
     fn ids(files: &[&SharedFile]) -> Vec<u64> {
         files.iter().map(|file| file.id.0).collect()
     }
 
-    fn child<'a>(node: &'a FolderNode<'a>, name: &str) -> &'a FolderNode<'a> {
-        node.children
-            .iter()
-            .find(|child| child.name == name)
-            .unwrap()
-    }
-
-    #[test]
-    fn keeps_loose_files_out_of_any_folder_node() {
-        let files = vec![
-            member(1, "C:/Photos", "beach.jpg"),
-            loose(2, "notes.txt"),
-            member(3, "C:/Photos", "a.txt"),
-        ];
-
-        let tree = build_folder_tree(&files);
-
-        assert_eq!(ids(&tree.loose), [2]);
-        // The loose file never lands in a folder node.
+    fn assert_node(node: &FolderNode, expected: &OutlineNode, spot: &str) {
         assert!(
-            tree.roots
-                .iter()
-                .all(|root| !root.files.iter().any(|file| file.id.0 == 2))
+            node.name == expected.name,
+            "{FIXTURE}: {spot}: folder name {:?} disagrees with the fixture's {:?}",
+            node.name,
+            expected.name
         );
-    }
-
-    #[test]
-    fn orders_roots_by_first_appearance_and_holds_files_before_subfolders() {
-        let files = vec![
-            member(1, "C:/Photos", "travel/beach.jpg"),
-            member(2, "C:/Photos", "sunrise.jpg"),
-            member(3, "C:/Docs", "a.txt"),
-            member(4, "C:/Photos", "notes/todo.txt"),
-        ];
-
-        let tree = build_folder_tree(&files);
-
-        let photos = &tree.roots[0];
-        assert_eq!(photos.name, "Photos");
-        assert_eq!(photos.depth, 0);
-        // Directly-stored member first, subfolder children after.
-        assert_eq!(ids(&photos.files), [2]);
-        assert_eq!(
-            photos
-                .children
-                .iter()
-                .map(|child| child.name.as_str())
-                .collect::<Vec<_>>(),
-            ["travel", "notes"]
+        assert!(
+            node.folder_root == PathBuf::from(&expected.folder_root),
+            "{FIXTURE}: {spot}: folder_root {:?} disagrees with the fixture's {:?}",
+            node.folder_root,
+            expected.folder_root
         );
-        assert_eq!(ids(&child(photos, "travel").files), [1]);
-        // `Photos` appears before `Docs` because its first member came first.
-        assert_eq!(tree.roots[1].name, "Docs");
-    }
-
-    #[test]
-    fn unwraps_arbitrarily_deep_nesting_with_depths() {
-        let files = vec![member(1, "C:/Photos", "travel/beach/sunset.jpg")];
-
-        let tree = build_folder_tree(&files);
-
-        let root = &tree.roots[0];
-        assert!(root.files.is_empty());
-        let beach = &child(&child(root, "travel"), "beach");
-        assert_eq!(beach.sub_path, "travel/beach");
-        assert_eq!(beach.depth, 2);
-        // Subfolder nodes inherit the root's absolute path.
-        assert_eq!(beach.folder_root, root.folder_root);
-        assert_eq!(ids(&beach.files), [1]);
-    }
-
-    #[test]
-    fn lists_subfolders_in_first_appearance_order_not_alphabetically() {
-        let files = vec![
-            member(1, "C:/Photos", "zebra/file-a.txt"),
-            member(2, "C:/Photos", "alpha/file-b.txt"),
-            member(3, "C:/Photos", "zebra/file-c.txt"),
-        ];
-
-        let tree = build_folder_tree(&files);
-
-        let root = &tree.roots[0];
-        assert_eq!(
-            root.children
-                .iter()
-                .map(|child| child.name.as_str())
-                .collect::<Vec<_>>(),
-            ["zebra", "alpha"]
+        assert!(
+            node.sub_path == expected.sub_path,
+            "{FIXTURE}: {spot}: sub_path {:?} disagrees with the fixture's {:?}",
+            node.sub_path,
+            expected.sub_path
         );
-        assert_eq!(ids(&child(root, "zebra").files), [1, 3]);
-    }
-
-    #[test]
-    fn routes_same_named_subfolders_to_their_own_roots() {
-        let files = vec![
-            member(1, "C:/one/Photos", "a/beach.jpg"),
-            member(2, "D:/two/Photos", "b/a/beach.jpg"),
-            member(3, "D:/two/Photos", "beach.jpg"),
-        ];
-
-        let tree = build_folder_tree(&files);
-
-        assert_eq!(tree.roots.len(), 2);
-        assert_eq!(
-            tree.roots
-                .iter()
-                .map(|root| root.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Photos", "Photos"]
+        assert!(
+            node.depth == expected.depth,
+            "{FIXTURE}: {spot}: depth {} disagrees with the fixture's {}",
+            node.depth,
+            expected.depth
         );
-        assert_eq!(child(&tree.roots[0], "a").files.len(), 1);
-        assert_eq!(ids(&child(&child(&tree.roots[1], "b"), "a").files), [2]);
-        assert_eq!(ids(&tree.roots[1].files), [3]);
+        assert!(
+            ids(&node.files) == expected.files,
+            "{FIXTURE}: {spot}: files (ids in shared-list order) {:?} disagree with the fixture's {:?}",
+            ids(&node.files),
+            expected.files
+        );
+        let children: Vec<&str> = node.children.iter().map(|child| child.name.as_str()).collect();
+        let expected_children: Vec<&str> =
+            expected.children.iter().map(|child| child.name.as_str()).collect();
+        assert!(
+            children == expected_children,
+            "{FIXTURE}: {spot}: children (first-appearance order) {children:?} disagree with the fixture's {expected_children:?}"
+        );
+        for (index, child) in expected.children.iter().enumerate() {
+            assert_node(&node.children[index], child, &format!("{spot}/{}", child.name));
+        }
     }
 
     #[test]
-    fn keeps_a_file_added_twice_as_two_entries_at_the_same_spot() {
-        let files = vec![
-            member(1, "C:/Photos", "beach.jpg"),
-            member(2, "C:/Photos", "beach.jpg"),
-        ];
-
+    fn derives_the_shared_fixture_input_into_exactly_the_shared_fixture_outline() {
+        let fixture = fixture();
+        let files = shared_files(&fixture);
         let tree = build_folder_tree(&files);
 
-        assert_eq!(ids(&tree.roots[0].files), [1, 2]);
-        assert!(tree.roots[0].children.is_empty());
+        let loose_ids: Vec<u64> = tree.loose.iter().map(|file| file.id.0).collect();
+        assert!(
+            loose_ids == fixture.outline.loose,
+            "{FIXTURE}: loose-file ids {loose_ids:?} disagree with the fixture's {:?}",
+            fixture.outline.loose
+        );
+        // The listed loose files must all actually be loose (no provenance).
+        assert!(
+            tree.loose.iter().all(|file| file.provenance.is_none()),
+            "{FIXTURE}: a listed loose file carried provenance"
+        );
+
+        let root_names: Vec<&str> = tree.roots.iter().map(|root| root.name.as_str()).collect();
+        let expected_names: Vec<&str> =
+            fixture.outline.roots.iter().map(|root| root.name.as_str()).collect();
+        assert!(
+            root_names == expected_names,
+            "{FIXTURE}: root names in first-appearance order {root_names:?} disagree with the fixture's {expected_names:?}"
+        );
+        for (index, expected) in fixture.outline.roots.iter().enumerate() {
+            assert_node(&tree.roots[index], expected, &format!("roots[{index}]"));
+        }
     }
 }

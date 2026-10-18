@@ -1,0 +1,93 @@
+{
+  "notes": [
+    "The one fixture both folder-tree mirrors read (ADR-0002): the TypeScript",
+    "derivation test (src/lib/folderTree.test.ts) and the Rust mirror's tests",
+    "(crates/mosquito-core/src/folder_tree.rs, mod tests) must each derive this",
+    "outline from this input list exactly. Every rule pinned by the former",
+    "hand-maintained case lists is encoded here:",
+    "- loose files (provenance null) stay ungrouped, ids listed under outline.loose",
+    "- one root per distinct folder_root, in first-appearance order; the root's",
+    "  display name is its last segment, splitting on both '/' and '\\'",
+    "  (the 'E:\\Archive' root covers the backslash case deliberately)",
+    "- files before subfolders at every level; files and children in",
+    "  first-appearance (shared-list) order, never alphabetical",
+    "- one subfolder per relative-path segment, unwrapped to any depth, with",
+    "  subPath ('/'-joined) and depth; subfolder nodes inherit the root's",
+    "  absolute folderRoot",
+    "- same-named subfolders route to their own root; same-named roots stay",
+    "  distinct entries",
+    "- a file added twice (ids 6 and 7) is two entries at the same spot",
+    "outline.files/reference ids into input; full SharedFiles are carried through."
+  ],
+  "input": [
+    { "id": 1, "name": "file-a.txt", "path": "C:/Photos/zebra/file-a.txt", "size": 11, "provenance": { "folder_root": "C:/Photos", "relative_path": "zebra/file-a.txt" } },
+    { "id": 2, "name": "sunrise.jpg", "path": "C:/Photos/sunrise.jpg", "size": 22, "provenance": { "folder_root": "C:/Photos", "relative_path": "sunrise.jpg" } },
+    { "id": 3, "name": "notes.txt", "path": "C:/Documents/notes.txt", "size": 33, "provenance": null },
+    { "id": 4, "name": "file-b.txt", "path": "C:/Photos/alpha/file-b.txt", "size": 44, "provenance": { "folder_root": "C:/Photos", "relative_path": "alpha/file-b.txt" } },
+    { "id": 5, "name": "file-c.txt", "path": "C:/Photos/zebra/file-c.txt", "size": 55, "provenance": { "folder_root": "C:/Photos", "relative_path": "zebra/file-c.txt" } },
+    { "id": 6, "name": "dup.jpg", "path": "C:/Photos/zebra/dup.jpg", "size": 66, "provenance": { "folder_root": "C:/Photos", "relative_path": "zebra/dup.jpg" } },
+    { "id": 7, "name": "dup.jpg", "path": "C:/Photos/zebra/dup.jpg", "size": 77, "provenance": { "folder_root": "C:/Photos", "relative_path": "zebra/dup.jpg" } },
+    { "id": 8, "name": "sunset.jpg", "path": "C:/Photos/travel/beach/sunset.jpg", "size": 88, "provenance": { "folder_root": "C:/Photos", "relative_path": "travel/beach/sunset.jpg" } },
+    { "id": 9, "name": "beach.jpg", "path": "D:/two/Photos/a/beach.jpg", "size": 99, "provenance": { "folder_root": "D:/two/Photos", "relative_path": "a/beach.jpg" } },
+    { "id": 10, "name": "beach.jpg", "path": "D:/two/Photos/b/a/beach.jpg", "size": 110, "provenance": { "folder_root": "D:/two/Photos", "relative_path": "b/a/beach.jpg" } },
+    { "id": 11, "name": "beach.jpg", "path": "D:/two/Photos/beach.jpg", "size": 121, "provenance": { "folder_root": "D:/two/Photos", "relative_path": "beach.jpg" } },
+    { "id": 12, "name": "app.log", "path": "E:\\Archive/logs/app.log", "size": 132, "provenance": { "folder_root": "E:\\Archive", "relative_path": "logs/app.log" } },
+    { "id": 13, "name": "readme.txt", "path": "E:\\Archive/readme.txt", "size": 143, "provenance": { "folder_root": "E:\\Archive", "relative_path": "readme.txt" } }
+  ],
+  "outline": {
+    "loose": [3],
+    "roots": [
+      {
+        "name": "Photos",
+        "folderRoot": "C:/Photos",
+        "subPath": "",
+        "depth": 0,
+        "files": [2],
+        "children": [
+          { "name": "zebra", "folderRoot": "C:/Photos", "subPath": "zebra", "depth": 1, "files": [1, 5, 6, 7], "children": [] },
+          { "name": "alpha", "folderRoot": "C:/Photos", "subPath": "alpha", "depth": 1, "files": [4], "children": [] },
+          {
+            "name": "travel",
+            "folderRoot": "C:/Photos",
+            "subPath": "travel",
+            "depth": 1,
+            "files": [],
+            "children": [
+              { "name": "beach", "folderRoot": "C:/Photos", "subPath": "travel/beach", "depth": 2, "files": [8], "children": [] }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Photos",
+        "folderRoot": "D:/two/Photos",
+        "subPath": "",
+        "depth": 0,
+        "files": [11],
+        "children": [
+          { "name": "a", "folderRoot": "D:/two/Photos", "subPath": "a", "depth": 1, "files": [9], "children": [] },
+          {
+            "name": "b",
+            "folderRoot": "D:/two/Photos",
+            "subPath": "b",
+            "depth": 1,
+            "files": [],
+            "children": [
+              { "name": "a", "folderRoot": "D:/two/Photos", "subPath": "b/a", "depth": 2, "files": [10], "children": [] }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Archive",
+        "folderRoot": "E:\\Archive",
+        "subPath": "",
+        "depth": 0,
+        "files": [13],
+        "children": [
+          { "name": "logs", "folderRoot": "E:\\Archive", "subPath": "logs", "depth": 1, "files": [12], "children": [] }
+        ]
+      }
+    ]
+  }
+}

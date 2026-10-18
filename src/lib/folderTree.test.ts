@@ -1,110 +1,91 @@
 import { describe, expect, it } from 'vitest';
+
+import fixtureJson from '../../test/fixtures/folder-tree/tree-input-and-outline.json';
 import { buildFolderTree } from './folderTree';
+import type { FolderNode } from './folderTree';
 import type { SharedFile } from '../types';
 
-function file(id: number, name: string, provenance: SharedFile['provenance']): SharedFile {
-  return { id, name, path: `C:/pics/${name}`, size: 7, provenance };
+// The canonical fixture both folder-tree mirrors' tests read (ADR-0002):
+// this test and the Rust mirror's tests in
+// crates/mosquito-core/src/folder_tree.rs must each derive the fixture's
+// outline from its input list exactly. The former hand-maintained case
+// lists are replaced by it — every rule they pinned is in the outline.
+const FIXTURE = 'test/fixtures/folder-tree/tree-input-and-outline.json';
+
+interface FixtureProvenance {
+  folder_root: string;
+  relative_path: string;
 }
 
-function member(id: number, relativePath: string, folderRoot: string): SharedFile {
-  return {
-    id,
-    name: relativePath.split('/').pop()!,
-    path: `${folderRoot}/${relativePath}`,
-    size: 7,
-    provenance: { folder_root: folderRoot, relative_path: relativePath }
-  };
+interface FixtureEntry {
+  id: number;
+  name: string;
+  path: string;
+  size: number;
+  provenance: FixtureProvenance | null;
 }
 
-describe('buildFolderTree', () => {
-  it('keeps loose files at the top and turns each folder root into a root node', () => {
-    const photos = 'C:/Photos';
-    const files = [
-      member(1, 'beach.jpg', photos),
-      file(2, 'notes.txt', null),
-      member(3, 'a.txt', photos)
-    ];
+interface OutlineNode {
+  name: string;
+  folderRoot: string;
+  subPath: string;
+  depth: number;
+  files: number[];
+  children: OutlineNode[];
+}
 
-    const tree = buildFolderTree(files);
+interface Fixture {
+  notes: string[];
+  input: FixtureEntry[];
+  outline: { loose: number[]; roots: OutlineNode[] };
+}
 
-    expect(tree.loose.map((f) => f.id)).toEqual([2]);
-    expect(tree.roots).toHaveLength(1);
-    expect(tree.roots[0]!.name).toBe('Photos');
-    expect(tree.roots[0]!.folderRoot).toBe(photos);
-    expect(tree.roots[0]!.files.map((f) => f.id)).toEqual([1, 3]);
-    expect(tree.roots[0]!.children).toEqual([]);
+const fixture: Fixture = fixtureJson;
+
+function sharedFilesFromFixture(): SharedFile[] {
+  return fixture.input.map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    path: entry.path,
+    size: entry.size,
+    provenance: entry.provenance
+      ? { folder_root: entry.provenance.folder_root, relative_path: entry.provenance.relative_path }
+      : null
+  }));
+}
+
+function assertNodeMatches(node: FolderNode, expected: OutlineNode, spot: string): void {
+  expect(node.name, `${FIXTURE}: ${spot} name disagrees`).toBe(expected.name);
+  // Subfolder nodes inherit the root's absolute path.
+  expect(node.folderRoot, `${FIXTURE}: ${spot} folderRoot disagrees`).toBe(expected.folderRoot);
+  expect(node.subPath, `${FIXTURE}: ${spot} subPath disagrees`).toBe(expected.subPath);
+  expect(node.depth, `${FIXTURE}: ${spot} depth disagrees`).toBe(expected.depth);
+  expect(node.files.map((file) => file.id), `${FIXTURE}: ${spot} files (ids in shared-list order) disagree`).toEqual(
+    expected.files
+  );
+  expect(
+    node.children.map((child) => child.name),
+    `${FIXTURE}: ${spot} children (first-appearance order) disagree`
+  ).toEqual(expected.children.map((child) => child.name));
+  expected.children.forEach((child, index) => {
+    assertNodeMatches(node.children[index]!, child, `${spot}/${child.name}`);
   });
+}
 
-  it('holds directly-contained files before the subfolder children', () => {
-    const photos = 'C:/Photos';
-    const files = [
-      member(1, 'travel/beach.jpg', photos),
-      member(2, 'sunrise.jpg', photos),
-      member(3, 'notes/todo.txt', photos)
-    ];
+describe(`buildFolderTree — shared fixture (${FIXTURE})`, () => {
+  it('derives the fixture input into exactly the fixture outline: loose files, root naming and order, files-before-subfolders, first-appearance ordering, arbitrary depth, duplicates, same-named roots and subfolders', () => {
+    const tree = buildFolderTree(sharedFilesFromFixture());
 
-    const tree = buildFolderTree(files);
+    expect(tree.loose.map((file) => file.id), `${FIXTURE}: loose-file ids disagree`).toEqual(fixture.outline.loose);
+    expect(
+      tree.loose.every((file) => file.provenance === null),
+      `${FIXTURE}: a listed loose file carried provenance`
+    ).toBe(true);
 
-    const root = tree.roots[0]!;
-    expect(root.files.map((f) => f.id)).toEqual([2]);
-    expect(root.children.map((c) => c.name)).toEqual(['travel', 'notes']);
-    expect(root.children[0]!.files.map((f) => f.id)).toEqual([1]);
-  });
-
-  it('unwraps arbitrarily deep nesting as one subfolder per segment, with depth set', () => {
-    const photos = 'C:/Photos';
-    const files = [member(1, 'travel/beach/sunset.jpg', photos)];
-
-    const tree = buildFolderTree(files);
-
-    const root = tree.roots[0]!;
-    expect(root.depth).toBe(0);
-    expect(root.files).toEqual([]);
-    expect(root.children.map((c) => c.subPath)).toEqual(['travel']);
-    expect(root.children[0]!.depth).toBe(1);
-    expect(root.children[0]!.children.map((c) => c.subPath)).toEqual(['travel/beach']);
-    expect(root.children[0]!.children[0]!.depth).toBe(2);
-    // Subfolder nodes inherit the root's absolute path.
-    expect(root.children[0]!.children[0]!.folderRoot).toBe(photos);
-    expect(root.children[0]!.children[0]!.files.map((f) => f.id)).toEqual([1]);
-  });
-
-  it('lists subfolders in first-appearance (add) order, not alphabetical', () => {
-    const photos = 'C:/Photos';
-    const files = [
-      member(1, 'zebra/file-a.txt', photos),
-      member(2, 'alpha/file-b.txt', photos),
-      member(3, 'zebra/file-c.txt', photos)
-    ];
-
-    const tree = buildFolderTree(files);
-
-    expect(tree.roots[0]!.children.map((c) => c.name)).toEqual(['zebra', 'alpha']);
-    expect(tree.roots[0]!.children[0]!.files.map((f) => f.id)).toEqual([1, 3]);
-  });
-
-  it('routes same-named files and subfolders to the same root nodes without merging by name alone', () => {
-    const files = [
-      member(1, 'a/beach.jpg', 'C:/one/Photos'),
-      member(2, 'b/a/beach.jpg', 'D:/two/Photos'),
-      member(3, 'beach.jpg', 'D:/two/Photos')
-    ];
-
-    const tree = buildFolderTree(files);
-
-    expect(tree.roots.map((r) => r.name)).toEqual(['Photos', 'Photos']);
-    expect(tree.roots[0]!.children.map((c) => c.name)).toEqual(['a']);
-    expect(tree.roots[1]!.children.map((c) => c.name)).toEqual(['b']);
-    expect(tree.roots[1]!.files.map((f) => f.id)).toEqual([3]);
-  });
-
-  it('keeps a file added twice as two entries at the same spot', () => {
-    const photos = 'C:/Photos';
-    const files = [member(1, 'beach.jpg', photos), member(2, 'beach.jpg', photos)];
-
-    const tree = buildFolderTree(files);
-
-    expect(tree.roots[0]!.files.map((f) => f.id)).toEqual([1, 2]);
-    expect(tree.roots[0]!.children).toEqual([]);
+    expect(
+      tree.roots.map((root) => root.name),
+      `${FIXTURE}: root names in first-appearance order disagree`
+    ).toEqual(fixture.outline.roots.map((root) => root.name));
+    tree.roots.forEach((root, index) => assertNodeMatches(root, fixture.outline.roots[index]!, `roots[${index}]`));
   });
 });
