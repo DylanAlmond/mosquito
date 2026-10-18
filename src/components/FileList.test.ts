@@ -185,6 +185,38 @@ describe('FileList', () => {
     ).toBe('mixed');
   });
 
+  it('starts a top-level folder with more than five children collapsed', async () => {
+    sharedFiles = [
+      member(1, 'one.txt', PHOTOS),
+      member(2, 'two.txt', PHOTOS),
+      member(3, 'three.txt', PHOTOS),
+      member(4, 'four.txt', PHOTOS),
+      member(5, 'five.txt', PHOTOS),
+      member(6, 'sub/folded.txt', PHOTOS)
+    ];
+    useSharer().files.value = sharedFiles;
+
+    const wrapper = mount(FileList);
+
+    // Six direct children — the root waits for the chevron, and its
+    // subtree ids stay complete for the checkbox (mirrors listing.rs).
+    const photos = folderRow(wrapper, 'Photos')!;
+    expect(photos.find('[aria-expanded]').attributes('aria-expanded')).toBe('false');
+    expect(rowTexts(wrapper)).toEqual(['Photos']);
+
+    await photos.find('[aria-label="Expand Photos"]').trigger('click');
+    expect(photos.find('[aria-expanded]').attributes('aria-expanded')).toBe('true');
+    expect(rowTexts(wrapper)).toEqual([
+      'Photos',
+      'one.txt',
+      'two.txt',
+      'three.txt',
+      'four.txt',
+      'five.txt',
+      'sub'
+    ]);
+  });
+
   it('stamps tree rows with their depth tokens and keeps loose files flush (ADR-0004)', async () => {
     const wrapper = mountList();
 
@@ -252,6 +284,41 @@ describe('FileList', () => {
     expect(
       folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')
     ).toBe('false');
+  });
+
+  it('keeps root overrides when the store re-reads files after an action', async () => {
+    sharedFiles = [
+      member(1, 'one.txt', PHOTOS),
+      member(2, 'two.txt', PHOTOS),
+      member(3, 'three.txt', PHOTOS),
+      member(4, 'four.txt', PHOTOS),
+      member(5, 'five.txt', PHOTOS),
+      member(6, 'sub/folded.txt', PHOTOS),
+      member(7, 'a.txt', DOCS)
+    ];
+    useSharer().files.value = sharedFiles;
+    const wrapper = mount(FileList);
+
+    // Over the budget, so the root starts collapsed; expanding it is an
+    // explicit override.
+    const photos = folderRow(wrapper, 'Photos')!;
+    await photos.find('[aria-label="Expand Photos"]').trigger('click');
+
+    // The next re-read lands the same members again (any action
+    // triggers one; assigning is what every action ends with).
+    useSharer().files.value = [...sharedFiles];
+
+    // The user-opened big root survives the re-read…
+    expect(folderRow(wrapper, 'Photos')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
+      'true'
+    );
+
+    // …and so does a user-collapsed one on a small root (Docs fixture).
+    await folderRow(wrapper, 'Docs')!.find('[aria-label="Collapse Docs"]').trigger('click');
+    useSharer().files.value = [...sharedFiles];
+    expect(folderRow(wrapper, 'Docs')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
+      'false'
+    );
   });
 
   it('delete selected removes loose file and every folder member it was grouped with', async () => {

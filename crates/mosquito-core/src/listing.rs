@@ -18,8 +18,10 @@ use crate::folder_tree::{FolderNode, build_folder_tree};
 /// and the action button where the app has "Delete selected" is the
 /// icon-only download button.
 ///
-/// The server emits the default expansion: folder roots expanded,
-/// subfolders collapsed (their members rendered `hidden` so the
+/// The server emits the default expansion: folder roots expanded —
+/// unless they hold more than five direct children, which start
+/// collapsed (mirrored budget) — and subfolders collapsed (their
+/// members rendered `hidden` so the
 /// enhancement script can reveal them without any dynamic markup). The
 /// script assumes JavaScript is present, like the checkboxes already do.
 pub(crate) fn render_listing(files: &[SharedFile], device_name: &str) -> String {
@@ -203,7 +205,14 @@ fn render_folder(
 ) {
     let key = escape_html(&folder_key(root_key, &node.sub_path));
     let expanded_region = expanded_shade(node.depth);
-    let expanded_default = node.depth == 0;
+    // Default expansion (mirrors the desktop's derivation): a root
+    // starts expanded only while it holds at most
+    // MAX_EXPANDED_CHILDREN direct children — bigger trees wait for
+    // the chevron so the entry view stays short. Subfolders always
+    // start collapsed. The enhancement script seeds from these
+    // aria-expanded values, so the default only paints the HTML.
+    let direct_children = node.files.len() + node.children.len();
+    let expanded_default = node.depth == 0 && direct_children <= MAX_EXPANDED_CHILDREN;
     let row_shade = if expanded_default {
         expanded_region
     } else {
@@ -260,6 +269,12 @@ struct RowContext {
     shade: u8,
     visible: bool,
 }
+
+/// How many direct children (files + subfolders) a root may hold and
+/// still start expanded. The desktop pins the same budget — check
+/// `MAX_EXPANDED_CHILDREN` in `FileList.vue` when this moves, and the
+/// pins in both test suites.
+const MAX_EXPANDED_CHILDREN: usize = 5;
 
 /// One selectable file row: a plain download link (works without
 /// JavaScript) wrapped around the name and size, with the selection
@@ -419,6 +434,48 @@ mod tests {
         // Root content sits at depth 1 under the depth-0 root.
         assert!(html.contains("data-depth=\"0\""));
         assert!(html.contains("data-depth=\"1\""));
+    }
+
+    #[test]
+    fn listing_collapses_roots_with_more_than_five_children() {
+        // Six direct children (five files + the `sub` subfolder) fold
+        // the root by default: big trees wait for the chevron. The
+        // members still render (hidden) for the enhancement script,
+        // subtree ids included.
+        let files = vec![
+            member(0, "one.txt", "Photographs", "one.txt"),
+            member(1, "two.txt", "Photographs", "two.txt"),
+            member(2, "three.txt", "Photographs", "three.txt"),
+            member(3, "four.txt", "Photographs", "four.txt"),
+            member(4, "five.txt", "Photographs", "five.txt"),
+            member(5, "todo.txt", "Photographs", "sub/todo.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        assert!(html.contains("aria-label=\"Expand Photographs\""));
+        assert!(html.contains(r#"data-folder-key="Photographs" data-shade="0""#));
+        // Hidden members still carry the region shade they would show
+        // inside — the root's depth-0 region is grey.
+        assert!(html.contains(r#"data-depth="1" data-shade="1" hidden style="--depth:1""#));
+    }
+
+    #[test]
+    fn listing_expands_roots_at_or_below_five_children() {
+        // Exactly five direct children — the boundary: the root still
+        // starts expanded.
+        let files = vec![
+            member(0, "one.txt", "Photographs", "one.txt"),
+            member(1, "two.txt", "Photographs", "two.txt"),
+            member(2, "three.txt", "Photographs", "three.txt"),
+            member(3, "four.txt", "Photographs", "four.txt"),
+            member(4, "five.txt", "Photographs", "five.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        assert!(html.contains("aria-label=\"Collapse Photographs\""));
+        assert!(html.contains(r#"data-folder-key="Photographs" data-shade="1""#));
     }
 
     #[test]

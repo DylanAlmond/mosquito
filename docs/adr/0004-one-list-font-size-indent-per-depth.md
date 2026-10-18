@@ -27,7 +27,10 @@ Consequences: both UIs must mirror this exactly (ADR-0003's duplicated design
 tokens extend to the indent step and the chevron carry); the depth token
 rides each tree row (`--depth`, plus `data-depth` on member file rows so the
 stylesheet can tell them from loose rows); loose rows carry no depth
-attributes on either side; row heights and touch targets are unchanged; the
-enhancement script needs no changes since the tokens ride the server-rendered
-rows.
+attributes on either side. Row heights unify on the folder row's 38px strip
+— files and the header included, header in the same 0.875rem as the rows —
+with the desktop list's 48px touch strip consciously traded for density.
+Top-level folders with more than five direct children start collapsed
+(mirrored budget), and the enhancement script needs no changes since the
+tokens ride the server-rendered rows.
 

@@ -41,6 +41,9 @@ Option 2: the folder tree remains fully derived (ADR-0001 undisturbed).
   (`FileList.vue`) extends to the tree.
 - Web assumes JavaScript is present; the server renders the tree in its
   default (top-level expanded) state and the enhanced script adds toggling.
+  _(Narrowed by ADR-0004 in 2026-10: roots with more than five direct
+  children now start collapsed on both surfaces; the mirror stays
+  desktop-first.)_
 
 ## Consequences
 

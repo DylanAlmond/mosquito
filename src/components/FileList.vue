@@ -19,11 +19,29 @@ const tree = computed(() => buildFolderTree(files.value));
 
 /// Expansion is UI-held state keyed by folder root + subfolder path
 /// (ADR-0002): it survives re-reads after every action and resets when
-/// the app restarts — it is never persisted. Roots default expanded,
-/// subfolders default collapsed; a checked key means "away from the
-/// default". Root key: the folder root itself (no subfolder path).
-const collapsedRoots = ref(new Set<string>());
+/// the app restarts — it is never persisted. Subfolders default
+/// collapsed and a checked key means "away from the default" (checked
+/// = open, one step past it). Roots default expanded too — a top-level
+/// folder with more than MAX_EXPANDED_CHILDREN direct children starts
+/// collapsed (mirrors listing.rs) — and a root override records the
+/// user's explicit open/closed choice, which beats the size default.
 const expandedSubfolders = ref(new Set<string>());
+const rootOverrides = ref(new Map<string, boolean>());
+
+/// How many direct children (files + subfolders) a top-level folder may
+/// hold and still start expanded — bigger roots wait for the chevron.
+/// The desktop budget mirrors `MAX_EXPANDED_CHILDREN` in listing.rs;
+/// move both together, with the pins in both test suites.
+const MAX_EXPANDED_CHILDREN = 5;
+
+/// Direct children decide a root's default: files plus subfolders, not
+/// the whole subtree — subfolders are collapsed rows anyway. A root
+/// that later drops to five children or fewer opens again on the next
+/// render unless the user picked a state meanwhile.
+function rootDefaultOpen(node: FolderNode) {
+  const directChildren = node.files.length + node.children.length;
+  return directChildren <= MAX_EXPANDED_CHILDREN;
+}
 
 function rootKey(node: FolderNode) {
   return node.folderRoot;
@@ -34,17 +52,18 @@ function subKey(node: FolderNode) {
 }
 
 function isExpanded(node: FolderNode) {
-  return node.subPath === ''
-    ? !collapsedRoots.value.has(rootKey(node))
-    : expandedSubfolders.value.has(subKey(node));
+  if (node.subPath === '') {
+    const override = rootOverrides.value.get(rootKey(node));
+    return override ?? rootDefaultOpen(node);
+  }
+  return expandedSubfolders.value.has(subKey(node));
 }
 
 function toggleFolder(node: FolderNode) {
   if (node.subPath === '') {
-    const key = rootKey(node);
-    const next = new Set(collapsedRoots.value);
-    next.has(key) ? next.delete(key) : next.add(key);
-    collapsedRoots.value = next;
+    const next = new Map(rootOverrides.value);
+    next.set(rootKey(node), !isExpanded(node));
+    rootOverrides.value = next;
   } else {
     const key = subKey(node);
     const next = new Set(expandedSubfolders.value);
@@ -53,15 +72,12 @@ function toggleFolder(node: FolderNode) {
   }
 }
 
-/// Shading alternates per depth (ADR-0002) and depth geometry indents
-/// rows (ADR-0004: name text 16px per level, folder chevron and member
-/// catch-up riding along): an expanded folder's whole region takes this
-/// shade, and a collapsed folder row falls back to the shade it
-/// inherited.
 type Shade = 0 | 1;
 
-/// The shade an expanded folder paints over itself and everything
-/// inside it: grey at even depth, back to the plain surface at odd.
+/// Shading alternates per depth (ADR-0002): an expanded folder's whole
+/// region takes this shade, and a collapsed folder row falls back to
+/// the shade it inherited. The depth geometry of ADR-0004 (name-text
+/// indent, chevron carry, member catch-up) rides the rows separately.
 function expandedRegionShade(depth: number): Shade {
   return depth % 2 === 0 ? 1 : 0;
 }
@@ -325,13 +341,15 @@ function removeSelected() {
   grid-template-columns: 32px minmax(0, 1fr) 32px;
   align-items: center;
   column-gap: 4px;
-  min-height: 48px;
+  /* Files match the folder row height now (ADR-0004 revision): the
+     38px strip is the shared row height, header included. */
+  min-height: 38px;
   padding: 0 10px;
 }
 
 .files-header {
   border-bottom: 2px solid var(--ink);
-  font-size: 1rem;
+  font-size: 0.875rem;
   font-weight: 600;
   line-height: 1;
 }

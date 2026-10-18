@@ -47,9 +47,11 @@ not shared, exactly like the logic underneath it.
   changes are made on `FileList.vue` first and echoed into `listing.html`.
 - The duplication is curated, not wholesale: only the tokens and rules
   the listing actually reproduces get copied, and where the surfaces
-  genuinely differ (a download button where the app has delete, 38px
-  tree rows, 3rem rows) the listing does its own arithmetic — the tokens
-  are duplicated, the rest is per-surface.
+  genuinely differ (a download button where the app has delete) the
+  listing does its own arithmetic — the tokens are duplicated, the rest
+  is per-surface. _(Revised by ADR-0004 in 2026-10: rows and headers are
+  one 38px strip on both surfaces now, so the old "3rem rows vs 38px
+  tree rows" split is gone.)_
 
 **Alternatives rejected:**
 
