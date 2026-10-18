@@ -159,8 +159,10 @@ fn root_keys(roots: &[FolderNode<'_>]) -> Vec<String> {
 
 /// Shading (ADR-0002): a whole expanded region paints grey at even
 /// depth, falls back to the plain surface at odd — alternating per
-/// nesting level, never by indentation. The server paints the default
-/// expansion: the client recomputes on every toggle.
+/// nesting level. The name-text indent (16px per depth, ADR-0004) rides
+/// on each row as its `--depth` token; shading stays computed, since a
+/// collapsed folder row keeps its parent's shade. The server paints the
+/// default expansion; the client recomputes on every toggle.
 fn expanded_shade(depth: usize) -> u8 {
     if depth % 2 == 0 { 1 } else { 0 }
 }
@@ -208,7 +210,7 @@ fn render_folder(
 
     let name = escape_html(&node.name);
     items.push_str(&format!(
-        "<li class=\"folder-row\" role=\"row\"{hidden} data-depth=\"{depth}\" data-folder-key=\"{key}\" data-shade=\"{shade}\">\
+        "<li class=\"folder-row\" role=\"row\"{hidden} data-depth=\"{depth}\" data-folder-key=\"{key}\" data-shade=\"{shade}\" style=\"--depth:{depth}\">\
 <button type=\"button\" role=\"checkbox\" aria-checked=\"false\" aria-label=\"Select all files in {name}\" data-subtree=\"{subtree}\" hidden>\
 {unchecked_svg}{checked_svg}\
 </button>\
@@ -267,7 +269,7 @@ fn file_row_html(file: &SharedFile, tree_row: Option<&RowContext>) -> String {
 
     let attrs = match tree_row {
         Some(context) => format!(
-            " data-depth=\"{depth}\" data-shade=\"{shade}\"{hidden}",
+            " data-depth=\"{depth}\" data-shade=\"{shade}\"{hidden} style=\"--depth:{depth}\"",
             depth = context.depth,
             shade = context.shade,
             hidden = if context.visible { "" } else { " hidden" },
@@ -429,6 +431,29 @@ mod tests {
         assert!(!row.contains("data-depth"));
         assert!(!row.contains("data-shade"));
         assert!(!row.contains("data-folder-key"));
+        assert!(!row.contains("style="));
+    }
+
+    #[test]
+    fn listing_indents_name_text_by_depth_through_the_depth_token() {
+        // The depth each member renders at — root 0, direct member 1,
+        // member under the subfolder 2 — rides each row as its
+        // `--depth` custom property (ADR-0004); the stylesheet turns it
+        // into 16px-per-level padding on the name text only.
+        let files = vec![
+            shared_file(0, "top.txt", None),
+            member(1, "beach.jpg", "Photographs", "beach.jpg"),
+            member(2, "todo.txt", "Photographs", "notes/todo.txt"),
+        ];
+
+        let html = render_listing(&files, "test-device");
+
+        // Root row (depth 0, its expanded region is grey).
+        assert!(html.contains(r#"data-folder-key="Photographs" data-shade="1" style="--depth:0""#));
+        // Direct member: depth 1, visible inside the root's grey region.
+        assert!(html.contains(r#"data-depth="1" data-shade="1" style="--depth:1""#));
+        // Member under the collapsed `notes` subfolder: depth 2, hidden.
+        assert!(html.contains(r#"data-depth="2" data-shade="0" hidden style="--depth:2""#));
     }
 
     #[test]

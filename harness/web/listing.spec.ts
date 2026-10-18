@@ -83,7 +83,8 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
   await expect(nestedMember).toContainText('todo.txt');
   await expect(nestedMember).toBeHidden();
 
-  // Depth alternates the shade without any indentation: the expanded
+  // Depth alternates the shade and indents the name text 16px per
+  // level (ADR-0004): the expanded
   // root's whole visible region carries the grey shade, and a
   // collapsed folder row keeps its parent's background.
   await expect(root).toHaveAttribute('data-shade', '1');
@@ -92,6 +93,23 @@ test('renders the folder tree with roots expanded and subfolders collapsed', asy
     '1'
   );
   await expect(notes).toHaveAttribute('data-shade', '1');
+  // The indent itself: computed padding grows 16px per depth, loose
+  // rows and folder roots stay flush.
+  await expect(page.locator('.file-row[data-depth="1"]:visible a > span')).toHaveCSS(
+    'padding-left',
+    '16px'
+  );
+  await expect(
+    page.locator('.folder-row[data-folder-key="Photographs/notes"] .folder-name')
+  ).toHaveCSS('padding-left', '16px');
+  await expect(page.locator('.folder-row[data-folder-key="Photographs"] .folder-name')).toHaveCSS(
+    'padding-left',
+    '0px'
+  );
+  await expect(page.locator('.file-row[data-depth="2"] a > span').first()).toHaveCSS(
+    'padding-left',
+    '32px'
+  );
 
   await page.screenshot({ path: shot('folder-groups') });
 });

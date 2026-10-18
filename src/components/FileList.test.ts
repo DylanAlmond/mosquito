@@ -185,6 +185,43 @@ describe('FileList', () => {
     ).toBe('mixed');
   });
 
+  it('stamps every rendered row with its depth token (ADR-0004)', async () => {
+    const wrapper = mountList();
+
+    const findRow = (text: string, selector: string) =>
+      wrapper
+        .findAll('.file-rows > li')
+        .find((row: any) => {
+          const match = row.find(selector);
+          return match.exists() && match.text() === text;
+        })!;
+
+    // jsdom normalizes the custom property spelling; collapse it back.
+    const depthToken = (row: any) => row.attributes('style')!.replace(/\s+/g, '');
+
+    // Folder roots and loose files sit at depth 0.
+    expect(depthToken(findRow('notes.txt', '.file-name'))).toContain('--depth:0');
+    expect(depthToken(findRow('Photos', '.folder-name'))).toBe('--depth:0;');
+    // Members one level under the folder storing them.
+    expect(depthToken(findRow('beach.jpg', '.file-name'))).toBe('--depth:1;');
+    expect(depthToken(findRow('vacation', '.folder-name'))).toBe('--depth:1;');
+
+    // Expanding the subfolder reveals its member at depth 2 (the
+    // first `beach.jpg` stays Photos' depth-1 member).
+    await findRow('vacation', '.folder-name')
+      .find('[aria-label="Expand vacation"]')
+      .trigger('click');
+    expect(
+      wrapper
+        .findAll('.file-row')
+        .some(
+          (row: any) =>
+            row.find('.file-name').text() === 'beach.jpg' &&
+            depthToken(row) === '--depth:2;'
+        )
+    ).toBe(true);
+  });
+
   it('keeps collapse state when the store re-reads files after an action', async () => {
     const wrapper = mountList();
 

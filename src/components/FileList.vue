@@ -53,9 +53,10 @@ function toggleFolder(node: FolderNode) {
   }
 }
 
-/// Shading alternates per depth — never indentation (ADR-0002): an
-/// expanded folder's whole region takes this shade, and a collapsed
-/// folder row falls back to the shade it inherited.
+/// Shading alternates per depth (ADR-0002) and rows indent their name
+/// text 16px per depth (ADR-0004): an expanded folder's whole region
+/// takes this shade, and a collapsed folder row falls back to the shade
+/// it inherited.
 type Shade = 0 | 1;
 
 /// The shade an expanded folder paints over itself and everything
@@ -65,7 +66,7 @@ function expandedRegionShade(depth: number): Shade {
 }
 
 type Row =
-  | { kind: 'file'; file: SharedFile; shade: Shade }
+  | { kind: 'file'; file: SharedFile; depth: number; shade: Shade }
   | { kind: 'folder'; node: FolderNode; depth: number; shade: Shade };
 
 function folderRows(node: FolderNode, parentShade: Shade): Row[] {
@@ -75,7 +76,9 @@ function folderRows(node: FolderNode, parentShade: Shade): Row[] {
 
   if (!open) return out;
 
-  for (const file of node.files) out.push({ kind: 'file', file, shade });
+  // Members sit one level below the folder that stores them — same
+  // depth the mirror (listing.rs) stamps them with.
+  for (const file of node.files) out.push({ kind: 'file', file, depth: node.depth + 1, shade });
   for (const child of node.children) out.push(...folderRows(child, shade));
   return out;
 }
@@ -83,7 +86,7 @@ function folderRows(node: FolderNode, parentShade: Shade): Row[] {
 const rows = computed<Row[]>(() => {
   const { loose, roots } = tree.value;
   return [
-    ...loose.map((file): Row => ({ kind: 'file', file, shade: 0 })),
+    ...loose.map((file): Row => ({ kind: 'file', file, depth: 0, shade: 0 })),
     ...roots.flatMap((root): Row[] => folderRows(root, 0))
   ];
 });
@@ -226,6 +229,7 @@ function removeSelected() {
           v-if="row.kind === 'folder'"
           class="folder-row"
           role="row"
+          :style="`--depth:${row.depth}`"
           :class="{ 'shade-1': row.shade === 1 }"
           :title="rowTitle(row)"
         >
@@ -261,6 +265,7 @@ function removeSelected() {
           class="file-row"
           :class="{ 'is-selected': isSelected(row.file.id), 'shade-1': row.shade === 1 }"
           :title="rowTitle(row)"
+          :style="`--depth:${row.depth}`"
           role="row"
           :aria-selected="isSelected(row.file.id)"
           @click="toggleFile(row.file.id)"
@@ -340,10 +345,23 @@ function removeSelected() {
   border-top: 1px solid var(--ink);
 }
 
-/* The shared shade token (style.css) — no indentation, and the whole
-   expanded folder incl. its contents reads as one region. */
+/* The shared shade token (style.css) — the whole expanded folder incl.
+   its contents reads as one region. */
 .shade-1 {
   background: var(--folder-shade);
+}
+
+/* One font size for all rows (ADR-0004): the depth cue moves to
+   geometry — the name text indents 16px per depth while the controls
+   keep their grid columns (the row sets a matching `--depth`). */
+.folder-row,
+.file-row {
+  font-size: 0.875rem;
+}
+
+.folder-name,
+.file-name {
+  padding-left: calc(16px * var(--depth, 0));
 }
 
 .folder-row {
@@ -354,7 +372,6 @@ function removeSelected() {
   min-height: 38px;
   padding: 0 10px;
   color: var(--ink);
-  font-size: 0.875rem;
   font-weight: 600;
   line-height: 1;
 }
