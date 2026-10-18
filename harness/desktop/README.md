@@ -77,7 +77,12 @@ the useful stable handles on the list are:
 
 The folder-tree selectors are the stable test contract for this UI
 (issue #8): scenarios target attributes, never layout or snapshot
-refs, so the DOM can change without harness breakage.
+refs, so the DOM can change without harness breakage. The web
+harness (`harness/web/README.md`) carries the corresponding contract
+for the served listing — same tree, same wording where the selectors
+match the app's, honest differences where the two implementations
+don't (attribute vs class shading, checkbox label wording, download
+links instead of click-to-select rows).
 
 Run the scenario again while the window is open:
 

@@ -23,6 +23,51 @@ Screenshots land in a deterministic, gitignored directory —
 `folder-groups`, `folder-toggles`, `selections` — same names every
 run).
 
+## Stable selectors (the test contract)
+
+The listing mirrors the desktop list's tree (ADR-0002) and — a
+deliberate mirror-by-duplicated-tokens, not shared code (ADR-0003) —
+its visual language too, so the web suite drives the same stable
+handles the desktop contract documents (`harness/desktop/README.md`).
+Specs target these selectors and the `data-*` attributes, never layout
+or generated markup, so the served page can change without harness
+breakage:
+
+| Selector | Meaning |
+| --- | --- |
+| `.empty-state` | the empty listing's message "Nothing is being shared right now." |
+| `.file-row` / `.file-row.is-selected` | file rows (loose and tree members alike), highlighted rows |
+| `.file-row[data-depth="n"]` | a tree member's nesting depth (loose files carry none) |
+| `.folder-row` | an expandable folder row (root or subfolder) |
+| `.folder-row[data-folder-key="f0"]` / `.folder-row[data-folder-key="f0/notes"]` | a folder row by its tree key: the root's render-order index plus its subfolder path |
+| `.folder-name` | a folder row's display name |
+| `[aria-label="Collapse <name>"]` / `[aria-label="Expand <name>"]` | the chevron only — the folder row, its name, and its body never toggle |
+| `[aria-expanded="true"]` / `[aria-expanded="false"]` | a folder's expansion state |
+| `[data-shade]` / `[data-shade="1"]` / `[data-shade="0"]` | the grey-region shade attribute, alternating per nesting level; `1` = shaded grey, `0` = plain surface |
+| `button[data-select="<id>"]` | a per-file checkbox (`aria-checked` `false`/`true`; hidden until the script runs) |
+| `button[data-subtree="<ids>"]` | a folder subtree checkbox listing every member id, folded members included (`aria-checked` `false`/`true`/`mixed`) |
+| `#select-all` | select-all header checkbox (`aria-checked` `false`/`true`/`mixed`) |
+| `#download-selected` / `#download-selected.is-visible` | icon-only download button, invisible until something is selected; `href` is `/download/<id>` for one file, `/download/zip?ids=<ids>` for several |
+
+Rows the default expansion keeps folded render with `hidden` (the
+enhancement script reveals them); tests assert that as visibility
+(`:visible`, `toBeHidden`) rather than the attribute itself.
+
+Same tree, same contract wording where the two UIs correspond — but
+the implementations really do differ in places, so the READMEs differ
+too:
+
+- Shading is a `data-shade` **attribute** on the web where the app uses
+  a `shade-1` **class**; both mean the same alternating, non-indented
+  grey region (ADR-0002).
+- Folder-checkbox labels differ: the web says "Select all files in
+  `<name>`" where the app says "Select or deselect all files in
+  `<name>`" — the tests key on `[data-select]`/`[data-subtree]` and the
+  chevron labels above, not on those checkbox texts.
+- Web row bodies are download links (per-file download works with
+  JavaScript off), where app rows select on click; the web suite
+  therefore always selects through checkboxes.
+
 ## Servers by hand
 
 ```sh
