@@ -40,11 +40,15 @@ Bringing content from the disk into the share. Loose files are registered immedi
 
 ## Import run
 
-A single user-initiated import, from the moment it starts until every folder root and loose file in it is counted, added, fails, or is cancelled. Progress is reported per folder root. A cancelled folder import leaves no root record — a half-done count is never recorded. _Avoid_: batch, job.
+A single user-initiated import, from the moment it starts until every folder root and loose file in it is counted, added, fails, or is cancelled. Progress is reported per folder root. A cancelled folder import leaves no root record — the record committed at import start is removed when the walk is cancelled or fails, so a half-done count never stands as a record. _Avoid_: batch, job, discovery.
 
 ## Live subtree
 
 A folder root's contents that have not yet been materialized: listings show them by scanning the disk when viewed, and downloads reflect the disk when they happen — including files added or deleted after the import. Once a folder inside is materialized, its membership is frozen (see **frozen snapshot**). _Avoid_: virtual folder.
+
+## Live count
+
+The count a **root record** holds while its **import run's** counting walk is still in flight: committed at 0 when the folder is dropped, updated by the walk's progress checkpoints, display-only on both surfaces. Distinct from a final count, which is simply the last number the walk left. _Avoid_: discovery count, provisional count.
 
 ## Loose file
 
@@ -68,7 +72,7 @@ A member file's path below its folder root (e.g. `vacation/beach.jpg` under root
 
 ## Root record
 
-The store's record of an imported folder root: its absolute path and a file count captured by the import's counting walk. A root record is not itself shareable or downloadable; its members become **shared files** only as they are materialized.
+The store's record of an imported folder root: its absolute path and a file count. The record commits when the folder is dropped (ADR-0008), with the count going **live** until the import run's counting walk ends. A root record is not itself shareable or downloadable; its members become **shared files** only as they are materialized.
 
 ## Shared file (SharedFile)
 
