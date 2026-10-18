@@ -1,26 +1,22 @@
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type {
   FailedAdd,
   ImportRunSnapshot,
   ImportStartOutcome,
+  RootRemoval,
+  RootRow,
   RootRun,
   RootRunStatus,
   ServerInfo,
-  SharedFile
+  SharedFile,
+  TopListing
 } from '../types';
 
 const NOT_RUNNING: ServerInfo = { running: false, url: null, port: null, lan_ip: null };
 
-/// Progress polling cadence. ADR-0007 leaves the desktop bridge open:
-/// snapshots are queryable, and the app already re-reads everything after
-/// every action ("divergence between UI and store is impossible"), so the
-/// board polls `import_runs` instead of introducing an event channel.
-/// Cheap local reads; the walk itself only reports every 500 counted
-/// files, so anything finer is invisible anyway.
-const POLL_MS = 250;
-
-const files = ref<SharedFile[]>([]);
+const loose = ref<SharedFile[]>([]);
+const roots = ref<RootRow[]>([]);
 const info = ref<ServerInfo>({ ...NOT_RUNNING });
 const qrSvg = ref<string | null>(null);
 const failedAdds = ref<FailedAdd[]>([]);
@@ -29,6 +25,19 @@ const busy = ref(false);
 /// Live import run snapshots (ADR-0007). Only refreshed while roots are
 /// counting; settled runs are dropped once nothing is in flight anymore.
 const runs = ref<ImportRunSnapshot[]>([]);
+
+/// Bumped on every re-read of the store. Components holding paged
+/// feeds watch it and re-fetch their pages, so the list can't drift
+/// from the store after any action.
+const contentVersion = ref(0);
+
+/// Progress polling cadence. ADR-0007 leaves the desktop bridge open:
+/// snapshots are queryable, and the app already re-reads everything after
+/// every action ("divergence between UI and store is impossible"), so the
+/// board polls `import_runs` instead of introducing an event channel.
+/// Cheap local reads; the walk itself only reports every 500 counted
+/// files, so anything finer is invisible anyway.
+const POLL_MS = 250;
 
 /// Root-record failures already handed to the failed-add banner. The
 /// registry keeps settled runs listed forever, so each run-root failure
@@ -60,12 +69,17 @@ export function stopRunPolling() {
   stopPolling();
 }
 
-/// Re-read everything from the backend. Cheap (local IPC, tiny lists)
-/// and it makes divergence between UI and store impossible.
+/// Re-read the derived top listing and the server state. Cheap (local
+/// IPC, tiny lists) and it makes divergence between UI and store
+/// impossible. The tree itself is derived by the backend per request, so
+/// the UI never derives folder structure any more (ADR-0006).
 async function refresh() {
-  files.value = await invoke<SharedFile[]>('list_files');
+  const top = await invoke<TopListing>('list_top');
+  loose.value = top.loose;
+  roots.value = top.roots;
   info.value = await invoke<ServerInfo>('get_server_info');
   qrSvg.value = info.value.running ? await invoke<string>('get_qr') : null;
+  contentVersion.value += 1;
 }
 
 function startPolling() {
@@ -112,6 +126,11 @@ async function pollRuns() {
 }
 
 export function useSharer() {
+  /// Share content present? Loose files count, and so does a root
+  /// record alone — a lazily-known import is shareable before anything
+  /// under it is registered.
+  const hasContent = computed(() => loose.value.length > 0 || roots.value.length > 0);
+
   /// Every action funnels through here
   async function guard(fn: () => Promise<void>) {
     error.value = null;
@@ -130,22 +149,24 @@ export function useSharer() {
     await guard(refresh);
   }
 
+  /// Import many paths: loose files register immediately, folders become
+  /// background import runs committing lazily-known root records
+  /// (ADR-0005/0007) whose progress shows on the board.
   async function addPaths(paths: string[]) {
     await guard(async () => {
       failedAdds.value = [];
       // (reportedFailures deliberately survives: an earlier failed run
       // must not resurface over this new outcome.)
 
-      // Loose files register here and now; folder roots start a
-      // background import run whose progress is shown on the board.
       const outcome = await invoke<ImportStartOutcome>('import_paths', { paths });
       failedAdds.value = outcome.immediate.failed;
 
       if (outcome.run_id !== null) await pollRuns();
 
-      // Product rule: the server runs whenever there's something to share.
-      // Dropping files IS the start button. Folder-only drops wait for the
-      // backend to auto-start the server when the first root commits.
+      // Product rule: the server runs whenever there's something to
+      // share. Dropping files IS the start button. Folder-only drops
+      // wait for the backend to auto-start the server when the first
+      // root commits.
       if (outcome.immediate.added.length > 0 && !info.value.running) {
         await invoke<ServerInfo>('start_server');
       }
@@ -173,15 +194,28 @@ export function useSharer() {
     });
   }
 
-  async function removeMany(ids: number[]) {
+  /// Remove one whole root record: the record plus every materialized
+  /// member in one action, then stop the server if nothing is left.
+  async function removeRoot(rootId: number) {
     await guard(async () => {
-      const idsToRemove = new Set(ids);
-      const filesToRemove = files.value.filter((file) => idsToRemove.has(file.id));
+      await invoke<RootRemoval>('remove_root', { rootId });
+      await refresh();
+    });
+  }
 
-      for (const file of filesToRemove) {
-        await invoke<SharedFile>('remove_file', { id: file.id });
+  /// One delete action for a mixed selection: whole root groups go
+  /// through `remove_root` (record plus every materialized member),
+  /// single file ids through `remove_file`. The caller pre-splits the
+  /// selection: member ids under a removed group are already swept by
+  /// the group's own removal and must not be removed twice.
+  async function removeSelection(ids: number[], rootIds: number[]) {
+    await guard(async () => {
+      for (const rootId of rootIds) {
+        await invoke<RootRemoval>('remove_root', { rootId });
       }
-
+      for (const id of ids) {
+        await invoke<SharedFile>('remove_file', { id });
+      }
       await refresh();
     });
   }
@@ -198,7 +232,10 @@ export function useSharer() {
   }
 
   return {
-    files,
+    loose,
+    roots,
+    hasContent,
+    contentVersion,
     info,
     qrSvg,
     failedAdds,
@@ -209,7 +246,8 @@ export function useSharer() {
     addPaths,
     cancelRun,
     remove,
-    removeMany,
+    removeRoot,
+    removeSelection,
     stop,
     dismissFailed
   };

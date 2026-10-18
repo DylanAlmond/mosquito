@@ -1,16 +1,40 @@
 use std::path::PathBuf;
 
 use mosquito_core::{
-    qr_svg, AddFilesOutcome, FileId, ImportRunSnapshot, ImportStartOutcome, MaterializeOutcome,
-    RootId, RootRecord, RootRemoval, ServerInfo, SharedFile, Sharer,
+    qr_svg, AddFilesOutcome, FileId, ImportRunSnapshot, ImportStartOutcome, LISTING_PAGE_ROWS,
+    MaterializeOutcome, NodePage, RootId, RootRecord, RootRemoval, ServerInfo, SharedFile,
+    Sharer, TopListing,
 };
 use tauri::State;
 
 use crate::PendingShareFiles;
 
+// -- paged listing derivation (ADR-0006, issue #24) ----------------------
+
 #[tauri::command]
-pub async fn list_files(sharer: State<'_, Sharer>) -> Result<Vec<SharedFile>, String> {
-    Ok(sharer.files())
+pub async fn list_top(sharer: State<'_, Sharer>) -> Result<TopListing, String> {
+    Ok(sharer.list_top())
+}
+
+/// One page of one node's rows: `sub_path` — empty for the root record
+/// itself — and the window's `offset`. The default limit is the
+/// listing's page budget; the UI fetches ahead within it.
+#[tauri::command]
+pub async fn list_page(
+    sharer: State<'_, Sharer>,
+    root_id: u64,
+    sub_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<NodePage, String> {
+    sharer
+        .list_page(
+            RootId(root_id),
+            &sub_path,
+            offset.unwrap_or(0),
+            limit.unwrap_or(LISTING_PAGE_ROWS),
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

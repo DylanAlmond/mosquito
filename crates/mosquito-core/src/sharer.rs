@@ -142,6 +142,32 @@ impl Sharer {
             .materialize(id)
     }
 
+    /// The listing derivation, shared command-shape: the top of the
+    /// list (loose files plus one row per root record). Pure derivation,
+    /// brief lock, no disk I/O.
+    pub fn list_top(&self) -> crate::listing_pages::TopListing {
+        self.store
+            .lock()
+            .expect("file store not poisoned")
+            .list_top()
+    }
+
+    /// One paged window of a node's rows. The request itself
+    /// materializes the node's direct children (ADR-0005 trigger), so
+    /// the lock brief covers one directory's scan at most.
+    pub fn list_page(
+        &self,
+        root_id: RootId,
+        sub_path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::listing_pages::NodePage, RemoveError> {
+        self.store
+            .lock()
+            .expect("file store not poisoned")
+            .list_page(root_id, sub_path, offset, limit)
+    }
+
     pub fn files(&self) -> Vec<SharedFile> {
         self.store
             .lock()

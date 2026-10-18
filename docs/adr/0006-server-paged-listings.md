@@ -43,8 +43,10 @@ the existing inline-script architecture, and buys nothing here.
   per-node pages for expansion. The inline script grows from toggle-only to fragment
   swap plus scroll-fetch.
 - ADR-0004's five-children rule (roots with few direct children default to expanded)
-  survives, now expressed once on the server; the cross-language pin disappears
-  together with the mirror.
+  survives on the server-rendered receiver page, now expressed once on the server. On
+  the desktop, issue #24 revises it: every root row starts collapsed there, because
+  expansion is now the act that materializes — a default-expanded desktop root would
+  register content on app open, a cost display must never imply (ADR-0005).
 - Folder-checkbox subtree payloads (today `data-subtree` id lists) are dropped for
   lazily-known content: subtree selection resolves through the node, registered
   members keep id-based selection.
@@ -60,3 +62,7 @@ the existing inline-script architecture, and buys nothing here.
 - Mid-list ordering guarantees only hold within a page as fetched; a live subtree may
   present differently on a later page request than an earlier one (live-subtree
   contract from ADR-0005).
+- A page fetch holds the store lock for one node's materialization at most — one
+  directory scan plus ADR-0007's bounded inserts — so the walk-free brief-lock
+  discipline carries over to listing; a request never holds the lock across a
+  listing-wide pass.

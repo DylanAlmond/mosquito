@@ -207,6 +207,42 @@ fn add_files_splits_successes_and_failures() {
     assert!(outcome.failed[0].error.contains("does not exist"));
 }
 
+#[tokio::test]
+async fn list_page_materializes_through_the_sharers_lock() {
+    use mosquito_core::{LISTING_PAGE_ROWS, PageRow};
+
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("Photos");
+    std::fs::create_dir_all(folder.join("sub")).unwrap();
+    std::fs::write(folder.join("a.txt"), b"a").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let outcome = sharer.import_paths(vec![folder.clone()]).await;
+
+    // Import runs commit in the background; wait for the record.
+    let run_id = outcome.run_id.expect("a folder import is a run");
+    let _ = wait_terminated(&sharer, run_id).await;
+
+    let root_id = sharer.list_top().roots.first().expect("root record committed").id;
+
+    let page = sharer.list_page(root_id, "", 0, LISTING_PAGE_ROWS).unwrap();
+
+    let names: Vec<&str> = page
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            PageRow::File { file } => Some(file.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["a.txt"]);
+    // Subfolders ride the scan as lazily-known rows.
+    assert!(page
+        .rows
+        .iter()
+        .any(|row| matches!(row, PageRow::LazyFolder { name } if name == "sub")));
+}
+
 #[test]
 fn add_files_walks_directories_into_their_files() {
     let dir = TempDir::new().unwrap();

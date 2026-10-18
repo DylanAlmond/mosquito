@@ -9,7 +9,7 @@ import FileList from './FileList.vue';
 import { useDragDrop } from '../composables/useDragDrop';
 import { countingRoots, useSharer } from '../composables/useSharer';
 
-const { files, info, qrSvg, runs, addPaths, cancelRun } = useSharer();
+const { hasContent, info, qrSvg, runs, addPaths, cancelRun } = useSharer();
 const { dragging } = useDragDrop(addPaths);
 
 const copied = ref(false);
@@ -124,7 +124,7 @@ async function copyUrl() {
     />
 
     <Transition name="files">
-      <div v-if="filesExpanded && files.length" class="file-list-transition">
+      <div v-if="filesExpanded && hasContent" class="file-list-transition">
         <FileList />
       </div>
     </Transition>
@@ -134,7 +134,7 @@ async function copyUrl() {
       type="button"
       :aria-expanded="filesExpanded"
       :aria-label="filesExpanded ? 'Hide shared files' : 'Show shared files'"
-      :disabled="files.length === 0"
+      :disabled="!hasContent"
       @click="filesExpanded = !filesExpanded"
     >
       <ChevronIcon class="icon" :class="{ 'is-collapsed': !filesExpanded }" />

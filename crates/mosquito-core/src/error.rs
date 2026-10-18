@@ -21,6 +21,8 @@ pub enum RemoveError {
     NotFound(FileId),
     #[error("no root record with id {0}")]
     RootNotFound(RootId),
+    #[error("listing path escapes its folder root: {0}")]
+    SubPathEscapesRoot(String),
 }
 
 #[derive(Debug, Error)]

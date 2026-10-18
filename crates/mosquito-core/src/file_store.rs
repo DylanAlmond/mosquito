@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::{AddFileError, RemoveError};
+use crate::listing_pages::{NodePage, PageRow};
 
 /// Opaque identifier for a shared file.
 /// Newtype over u64 so signatures can't confuse it with a random number,
@@ -40,7 +41,7 @@ pub struct FolderProvenance {
 }
 
 /// One path that couldn't be added, and why.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FailedAdd {
     pub path: PathBuf,
     pub error: String,
@@ -80,6 +81,8 @@ pub struct MaterializeOutcome {
     /// idempotency key made them a no-op.
     pub skipped: u64,
     pub failed: Vec<FailedAdd>,
+    /// Subfolders seen during the scan: lazily-known rows, no ids.
+    pub lazy_subfolders: Vec<String>,
 }
 
 /// What removing a root record took with it.
@@ -366,42 +369,37 @@ impl FileStore {
         })
     }
 
-    /// Register the lazily-known direct children of a root record's
-    /// folder (ADR-0005): regular files directly inside it become shared
-    /// files; subfolders stay lazily-known (they materialize on their own
-    /// turn), symlinks are skipped outright, and unreadable entries are
-    /// reported per-entry like any batch add.
+    /// Register the lazily-known direct children of `root`'s folder, or
+    /// of a subfolder `sub_path` below it (ADR-0005): regular files
+    /// directly inside become shared files; subfolders stay lazily-known
+    /// (they list on their own turn), symlinks are skipped outright, and
+    /// unreadable entries are reported per-entry like any batch add.
+    /// The lazily-known subfolder names ride the outcome so a listing
+    /// can derive its folder rows from the same single scan.
     ///
     /// Idempotent, keyed by (folder root, relative path): materializing
     /// twice — or two root records pointing at the same folder — converges
     /// on one registration per file instead of duplicates.
-    ///
-    /// The error type is [`RemoveError`][crate::error::RemoveError]'s
-    /// RootNotFound variant: materialization's only failure is an unknown
-    /// root id, and "no root record with that id" is one domain error
-    /// whoever asks.
-    pub fn materialize(&mut self, id: RootId) -> Result<MaterializeOutcome, RemoveError> {
-        let root_path = self
-            .roots
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| r.path.clone())
-            .ok_or(RemoveError::RootNotFound(id))?;
-
+    pub fn materialize_at(&mut self, root: &Path, sub_path: &str) -> MaterializeOutcome {
         let mut outcome = MaterializeOutcome {
             added: Vec::new(),
             skipped: 0,
             failed: Vec::new(),
+            lazy_subfolders: Vec::new(),
         };
 
-        let entries = match std::fs::read_dir(&root_path) {
+        let node = node_directory(root, sub_path).expect(
+            "materialize_at is called with an already-validated sub path",
+        );
+
+        let entries = match std::fs::read_dir(&node) {
             Ok(entries) => entries,
             Err(e) => {
                 outcome.failed.push(FailedAdd {
-                    path: root_path,
+                    path: node,
                     error: e.to_string(),
                 });
-                return Ok(outcome);
+                return outcome;
             }
         };
 
@@ -410,7 +408,7 @@ impl FileStore {
                 Ok(entry) => entry,
                 Err(e) => {
                     outcome.failed.push(FailedAdd {
-                        path: root_path.clone(),
+                        path: node.clone(),
                         error: e.to_string(),
                     });
                     continue;
@@ -437,6 +435,9 @@ impl FileStore {
             if file_type.is_dir() {
                 // Lazily-known: becomes visible by expanding, which
                 // materializes its own direct children.
+                outcome
+                    .lazy_subfolders
+                    .push(entry.file_name().to_string_lossy().into_owned());
                 continue;
             }
             if !file_type.is_file() {
@@ -447,7 +448,7 @@ impl FileStore {
                 continue;
             }
 
-            let relative_path = match relative_path_string(&root_path, &path) {
+            let relative_path = match relative_path_string(root, &path) {
                 Some(relative_path) => relative_path,
                 None => {
                     outcome.failed.push(FailedAdd {
@@ -464,7 +465,7 @@ impl FileStore {
             let already_registered = self.files.iter().any(|f| {
                 f.provenance
                     .as_ref()
-                    .is_some_and(|p| p.folder_root == root_path && p.relative_path == relative_path)
+                    .is_some_and(|p| p.folder_root == *root && p.relative_path == relative_path)
             });
             if already_registered {
                 outcome.skipped += 1;
@@ -474,7 +475,7 @@ impl FileStore {
             match self.insert(
                 path.clone(),
                 Some(FolderProvenance {
-                    folder_root: root_path.clone(),
+                    folder_root: root.to_path_buf(),
                     relative_path,
                 }),
             ) {
@@ -486,8 +487,137 @@ impl FileStore {
             }
         }
 
-        Ok(outcome)
+        outcome
     }
+
+    /// Register the lazily-known direct children of a root record's
+    /// folder — the (folder root, relative path) of the record itself.
+    /// The only failure is an unknown root id: materialization strokes
+    /// per-entry problems as failures inside the outcome, not errors.
+    pub fn materialize(&mut self, id: RootId) -> Result<MaterializeOutcome, RemoveError> {
+        let record = self
+            .roots
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.path.clone())
+            .ok_or(RemoveError::RootNotFound(id))?;
+        Ok(self.materialize_at(&record, ""))
+    }
+
+    /// One paged window of `sub_path`'s rows below the root record
+    /// `id` — the store-side listing derivation ADR-0006 and issue #24
+    /// call for. The request itself materializes the node's direct
+    /// children ([`FileStore::materialize_at`]); the page then derives
+    /// from the registered membership plus the scan's lazily-known
+    /// subfolder rows.
+    ///
+    /// Page slices hold files first (name-sorted), then lazily-known
+    /// subfolders (name-sorted). Order guarantees hold within a page as
+    /// fetched; a live subtree may present differently on the next page
+    /// request — accepted by the contract.
+    pub fn list_page(
+        &mut self,
+        id: RootId,
+        sub_path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<NodePage, RemoveError> {
+        let record = self
+            .roots
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| PathBuf::from(r.path.clone()))
+            .ok_or(RemoveError::RootNotFound(id))?;
+
+        // The sub path decides whether a listing asks for content that
+        // lives at all inside the root record's subtree — anything
+        // else is a caller error, not a behavior.
+        if node_directory(&record, sub_path).is_none() {
+            return Err(RemoveError::SubPathEscapesRoot(sub_path.to_string()));
+        }
+
+        // The listing showing the folder IS the materialization
+        // trigger: one scan registers direct children and hands back
+        // the lazily-known subfolder names plus per-entry failures.
+        let scan = self.materialize_at(&record, sub_path);
+
+        // File rows come from the registered membership, not from the
+        // scan — a member materialized earlier keeps its row even when
+        // it vanishes from disk (frozen snapshot; its download fails
+        // later, as for any shared file). One level deep only: this
+        // node's direct children.
+        let mut file_rows: Vec<SharedFile> = self
+            .files
+            .iter()
+            .filter(|file| {
+                file.provenance
+                    .as_ref()
+                    .is_some_and(|provenance| {
+                        provenance.folder_root == record
+                            && relative_in_node(&provenance.relative_path, sub_path)
+                    })
+            })
+            .cloned()
+            .collect();
+        file_rows.sort_by_cached_key(|file| file.name.to_lowercase());
+
+        let mut folders = scan.lazy_subfolders;
+        folders.sort_by_cached_key(|name| name.to_lowercase());
+
+        // A page always shows the node's rows in one order: files
+        // first, then the lazily-known subfolders, each name-sorted.
+        let total = file_rows.len() + folders.len();
+        let mut rows: Vec<PageRow> = Vec::with_capacity(total);
+        rows.extend(file_rows.into_iter().map(|file| PageRow::File { file }));
+        rows.extend(folders.into_iter().map(|name| PageRow::LazyFolder { name }));
+
+        let window: Vec<PageRow> = rows.into_iter().skip(offset).take(limit).collect();
+        let has_more = total > offset + window.len();
+
+        Ok(NodePage {
+            root_id: id,
+            sub_path: sub_path.to_string(),
+            offset,
+            rows: window,
+            failures: scan.failed,
+            total,
+            has_more,
+        })
+    }
+}
+
+/// Whether `relative_path` names a direct child of `node_sub_path`:
+/// directly-inside rows carry the node path as nothing (empty sub) or
+/// `node/` prefix plus one more segment. This yields, for each row, the
+/// level directly below the node — members one level down only.
+fn relative_in_node(relative_path: &str, node_sub_path: &str) -> bool {
+    if node_sub_path.is_empty() {
+        !relative_path.contains('/')
+    } else {
+        match relative_path.strip_prefix(node_sub_path).and_then(|rest| rest.strip_prefix('/')) {
+            Some(rest) => !rest.contains('/'),
+            None => false,
+        }
+    }
+}
+
+/// The absolute directory of a node: `root` itself for an empty sub
+/// path, else `root` joined with the sub path's segments. Traversal is
+/// rejected outright — every segment must be a plain name (no `..`,
+/// no empty segments, no separators hidden inside a segment), so a
+/// listing can never name something outside the root's subtree.
+fn node_directory(root: &Path, sub_path: &str) -> Option<PathBuf> {
+    if sub_path.is_empty() {
+        return Some(root.to_path_buf());
+    }
+    let mut node = root.to_path_buf();
+    for segment in sub_path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
+            return None;
+        }
+        node.push(segment);
+    }
+    Some(node)
 }
 
 /// Whether a dropped path is a link (symlink or junction on Windows).

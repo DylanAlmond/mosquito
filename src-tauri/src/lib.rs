@@ -90,7 +90,8 @@ pub fn run() {
         builder
             .plugin(tauri_plugin_pilot::init())
             .invoke_handler(tauri::generate_handler![
-                list_files,
+                list_top,
+                list_page,
                 add_files,
                 remove_file,
                 start_server,
@@ -110,7 +111,8 @@ pub fn run() {
 
     #[cfg(any(not(debug_assertions), not(feature = "pilot")))]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        list_files,
+        list_top,
+        list_page,
         add_files,
         remove_file,
         start_server,

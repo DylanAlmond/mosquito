@@ -28,8 +28,8 @@ describe('SharePanel import runs', () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation((async (command: string) => {
       switch (command) {
-        case 'list_files':
-          return [];
+        case 'list_top':
+          return { loose: [], roots: [] };
         case 'get_server_info':
           return SERVER_STOPPED;
         case 'get_qr':
@@ -58,7 +58,8 @@ describe('SharePanel import runs', () => {
   function sharedFilesReset() {
     const sharer = useSharer();
     sharer.info.value = SERVER_STOPPED;
-    sharer.files.value = [];
+    sharer.loose.value = [];
+    sharer.roots.value = [];
     sharer.failedAdds.value = [];
     sharer.runs.value = [];
     sharer.busy.value = false;
@@ -169,7 +170,7 @@ describe('SharePanel import runs', () => {
     await pickFolder(wrapper, 'C:/Users/me/Photos');
 
     const listCalls = () =>
-      vi.mocked(invoke).mock.calls.filter(([command]) => command === 'list_files').length;
+      vi.mocked(invoke).mock.calls.filter(([command]) => command === 'list_top').length;
     const callsBefore = listCalls();
 
     importRuns = [
