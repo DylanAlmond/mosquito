@@ -4,6 +4,7 @@ import { ref, watch } from 'vue';
 import ChevronIcon from '../assets/chevron-compact-up.svg';
 import CopyIcon from '../assets/copy.svg';
 import CopiedIcon from '../assets/square-rounded-check.svg';
+import ChooseSection from './ChooseSection.vue';
 import FileList from './FileList.vue';
 import { useDragDrop } from '../composables/useDragDrop';
 import { useSharer } from '../composables/useSharer';
@@ -68,29 +69,11 @@ async function copyUrl() {
       <span class="drop-title">Drop files or folders here</span>
     </button>
 
-    <section class="choose-section">
-      <button
-        class="choose-button"
-        type="button"
-        aria-label="Choose file"
-        :disabled="busy || selecting"
-        @click="chooseFiles"
-      >
-        Choose File
-      </button>
-
-      <span>or</span>
-
-      <button
-        class="choose-button"
-        type="button"
-        aria-label="Choose folder"
-        :disabled="busy || selecting"
-        @click="chooseFolder"
-      >
-        Choose Folder
-      </button>
-    </section>
+    <ChooseSection
+      :disabled="busy || selecting"
+      @choose-files="chooseFiles"
+      @choose-folder="chooseFolder"
+    />
   </template>
 
   <template v-else>
@@ -124,29 +107,11 @@ async function copyUrl() {
       </button>
     </section>
 
-    <section class="choose-section">
-      <button
-        class="choose-button"
-        type="button"
-        aria-label="Choose file"
-        :disabled="busy || selecting"
-        @click="chooseFiles"
-      >
-        Choose File
-      </button>
-
-      <span>or</span>
-
-      <button
-        class="choose-button"
-        type="button"
-        aria-label="Choose folder"
-        :disabled="busy || selecting"
-        @click="chooseFolder"
-      >
-        Choose Folder
-      </button>
-    </section>
+    <ChooseSection
+      :disabled="busy || selecting"
+      @choose-files="chooseFiles"
+      @choose-folder="chooseFolder"
+    />
 
     <Transition name="files">
       <div v-if="filesExpanded && files.length" class="file-list-transition">
@@ -202,34 +167,6 @@ async function copyUrl() {
   margin: 0;
   font-size: 1.25rem;
   text-align: center;
-}
-
-.choose-section {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem;
-  width: 100%;
-  margin: 1rem 0;
-  color: var(--ink);
-  font-size: 0.9375rem;
-}
-
-.choose-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: fit-content;
-  height: 2.25rem;
-  padding: 0;
-  border: 0;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.choose-button:disabled {
-  cursor: default;
-  opacity: 0.45;
 }
 
 .qr {

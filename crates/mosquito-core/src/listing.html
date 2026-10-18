@@ -398,7 +398,7 @@
                 // Even depth regions are grey, odd ones fall back — and
                 // a collapsed folder row keeps its parent's shade.
                 var shade = open ? (depth % 2 === 0 ? 1 : 0) : parent ? parent.shade : 0;
-                row.hidden = !!parent && !openStack(stack);
+                row.hidden = !!parent && !isEveryAncestorExpanded(stack);
                 row.dataset.shade = String(shade);
                 stack.push({ depth: depth, open: open, shade: shade });
 
@@ -413,15 +413,16 @@
                   chevron.classList.toggle('is-collapsed', !open);
                 }
               } else {
-                row.hidden = !openStack(stack);
+                row.hidden = !isEveryAncestorExpanded(stack);
                 row.dataset.shade = String(parent ? parent.shade : 0);
               }
             }
           );
         }
 
-        // Every folder in scope is open.
-        function openStack(stack) {
+        // Whether every ancestor still on the scan stack is open —
+        // i.e. whether this row sits inside an expanded region.
+        function isEveryAncestorExpanded(stack) {
           for (var i = 0; i < stack.length; i += 1) {
             if (!stack[i].open) return false;
           }

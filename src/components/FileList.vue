@@ -125,12 +125,32 @@ function nodeMemberIds(node: FolderNode): number[] {
   ];
 }
 
-function nodeCheckState(node: FolderNode): 'checked' | 'mixed' | 'unchecked' {
+type CheckState = 'checked' | 'mixed' | 'unchecked';
+
+function nodeCheckState(node: FolderNode): CheckState {
   const memberIds = nodeMemberIds(node);
 
   if (memberIds.every((id) => selectedIds.value.includes(id))) return 'checked';
   if (memberIds.some((id) => selectedIds.value.includes(id))) return 'mixed';
   return 'unchecked';
+}
+
+/// Each folder row's check state, computed once per row — the folder
+/// checkboxes need it for both their aria-checked and their icon.
+const folderCheckStates = computed(() => {
+  const states = new Map<FolderNode, CheckState>();
+
+  for (const row of rows.value) {
+    if (row.kind === 'folder') states.set(row.node, nodeCheckState(row.node));
+  }
+
+  return states;
+});
+
+/// The checkbox's exact aria-checked spelling for a check state; a row
+/// missing from the map (it is not a folder row) reads as unchecked.
+function checkStateAria(state: CheckState | undefined) {
+  return state === 'checked' ? 'true' : state === 'mixed' ? 'mixed' : 'false';
 }
 
 function toggleNode(node: FolderNode) {
@@ -146,10 +166,6 @@ function toggleNode(node: FolderNode) {
 
 /// Rows show the file's own name; where it hangs under the root is the
 /// tree's job now. The full path stays in the row title.
-function memberTitle(file: SharedFile) {
-  return file.name;
-}
-
 function rowTitle(row: Row) {
   if (row.kind === 'file') return row.file.path;
   return row.node.subPath
@@ -217,12 +233,12 @@ function removeSelected() {
             class="checkbox-control"
             type="button"
             role="checkbox"
-            :aria-checked="nodeCheckState(row.node) === 'checked' ? 'true' : nodeCheckState(row.node) === 'mixed' ? 'mixed' : 'false'"
+            :aria-checked="checkStateAria(folderCheckStates.get(row.node))"
             :aria-label="`Select or deselect all files in ${row.node.name}`"
             :disabled="busy"
             @click="toggleNode(row.node)"
           >
-            <CheckedIcon v-if="nodeCheckState(row.node) === 'checked'" />
+            <CheckedIcon v-if="folderCheckStates.get(row.node) === 'checked'" />
             <UncheckedIcon v-else />
           </button>
 
@@ -253,7 +269,7 @@ function removeSelected() {
             type="button"
             role="checkbox"
             :aria-checked="isSelected(row.file.id)"
-            :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${memberTitle(row.file)}`"
+            :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${row.file.name}`"
             :disabled="busy"
             @click.stop="toggleFile(row.file.id)"
           >
@@ -261,11 +277,11 @@ function removeSelected() {
             <UncheckedIcon v-else />
           </button>
 
-          <span class="file-name">{{ memberTitle(row.file) }}</span>
+          <span class="file-name">{{ row.file.name }}</span>
 
           <button
             type="button"
-            :aria-label="`Delete ${memberTitle(row.file)}`"
+            :aria-label="`Delete ${row.file.name}`"
             :disabled="busy"
             @click.stop="removeOne(row.file.id)"
           >
