@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mosquito_core::{FileStore, LanAddress, Sharer, SharerError};
+use mosquito_core::{FileStore, LanAddress, RootRunStatus, RunId, Sharer, SharerError};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -277,4 +277,223 @@ fn add_files_with_no_paths_is_clean() {
     let outcome = sharer.add_files(vec![]);
     assert!(outcome.added.is_empty());
     assert!(outcome.failed.is_empty());
+}
+
+// -- import runs (ADR-0007): background count-only folder imports ------
+
+/// Wait until every root in a run left the Counting state, then hand
+/// back each root's terminal status. Fails after 5 s instead of hanging.
+async fn wait_terminated(sharer: &Sharer, run_id: RunId) -> Vec<RootRunStatus> {
+    let start = std::time::Instant::now();
+    loop {
+        let snapshot = sharer
+            .import_run_status()
+            .into_iter()
+            .find(|snapshot| snapshot.run_id == run_id)
+            .expect("the run is recorded in the registry");
+        let counting = snapshot
+            .roots
+            .iter()
+            .filter(|root| root.status == RootRunStatus::Counting)
+            .count();
+        if counting == 0 {
+            return snapshot.roots.into_iter().map(|root| root.status).collect();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "import never finished: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Nested tree with exactly two files (a.txt at the root, sub/b.txt).
+fn make_nested_tree(dir: &std::path::Path) -> PathBuf {
+    let root = dir.join("photos");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("a.txt"), b"a").unwrap();
+    std::fs::write(root.join("sub").join("b.txt"), b"b").unwrap();
+    root
+}
+
+#[tokio::test]
+async fn import_paths_commits_root_records_in_the_background() {
+    let dir = TempDir::new().unwrap();
+    let root = make_nested_tree(dir.path());
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![root.clone()]).await;
+
+    // Nothing happens inline for a folder drop — the run is the product.
+    assert!(started.immediate.added.is_empty());
+    assert!(started.immediate.failed.is_empty());
+    let run_id = started.run_id.expect("a folder drop starts a run");
+
+    let statuses = wait_terminated(&sharer, run_id).await;
+    assert_eq!(statuses, vec![RootRunStatus::Committed]);
+
+    // Count-only: no shared file was registered under the root.
+    assert!(sharer.files().is_empty());
+    let roots = sharer.roots();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].path, root);
+    assert_eq!(roots[0].file_count, 2);
+}
+
+#[tokio::test]
+async fn mixed_drops_register_loose_files_immediately() {
+    let dir = TempDir::new().unwrap();
+    let root = make_nested_tree(dir.path());
+    let loose = dir.path().join("loose.txt");
+    std::fs::write(&loose, b"l").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![root.clone(), loose.clone()]).await;
+
+    assert_eq!(started.immediate.added.len(), 1);
+    assert_eq!(started.immediate.added[0].name, "loose.txt");
+    assert!(started.immediate.added[0].provenance.is_none());
+
+    let run_id = started
+        .run_id
+        .expect("the folder part of a drop starts a run");
+    let statuses = wait_terminated(&sharer, run_id).await;
+    assert_eq!(statuses, vec![RootRunStatus::Committed]);
+
+    // Only the loose file is registered; the counted folder is not.
+    assert_eq!(sharer.files().len(), 1);
+    assert_eq!(sharer.roots().len(), 1);
+}
+
+#[tokio::test]
+async fn a_committed_root_record_auto_starts_the_server() {
+    let dir = TempDir::new().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![empty]).await;
+    let run_id = started.run_id.expect("a folder drop starts a run");
+    let statuses = wait_terminated(&sharer, run_id).await;
+    assert_eq!(statuses, vec![RootRunStatus::Committed]);
+
+    // A root record alone counts as content: the share is live.
+    assert!(sharer.status().running);
+
+    sharer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn removing_the_last_root_record_auto_stops_the_server() {
+    let dir = TempDir::new().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![empty]).await;
+    let run_id = started.run_id.unwrap();
+    wait_terminated(&sharer, run_id).await;
+    assert!(sharer.status().running);
+
+    let root_id = sharer.roots()[0].id;
+    sharer.remove_root(root_id).await.unwrap();
+
+    assert!(!sharer.status().running);
+}
+
+#[tokio::test]
+async fn removing_the_last_file_auto_stops_the_server() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("lonely.txt");
+    std::fs::write(&path, b"only").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let added = sharer.add_file(&path).unwrap();
+    sharer.start_on(0).unwrap();
+
+    sharer.remove_file(added.id).await.unwrap();
+
+    assert!(!sharer.status().running);
+}
+
+#[tokio::test]
+async fn duplicate_imports_of_the_same_folder_do_not_duplicate_registrations() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("flat");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("only.txt"), b"o").unwrap();
+
+    let sharer = sharer_on("192.0.2.7");
+    let first = sharer.import_paths(vec![root.clone()]).await;
+    let second = sharer.import_paths(vec![root.clone()]).await;
+
+    let first_status = wait_terminated(&sharer, first.run_id.unwrap()).await;
+    let second_status = wait_terminated(&sharer, second.run_id.unwrap()).await;
+    assert_eq!(first_status, vec![RootRunStatus::Committed]);
+    assert_eq!(second_status, vec![RootRunStatus::Committed]);
+
+    assert_eq!(sharer.roots().len(), 2, "duplicates stay legal");
+
+    // Materializing both records converges on one registration.
+    let via_first = sharer.materialize_root(sharer.roots()[0].id).unwrap();
+    assert_eq!(via_first.added.len(), 1);
+
+    let via_second = sharer.materialize_root(sharer.roots()[1].id).unwrap();
+    assert_eq!(via_second.added.len(), 0);
+    assert_eq!(via_second.skipped, 1);
+    assert_eq!(sharer.files().len(), 1);
+}
+
+#[tokio::test]
+async fn cancel_import_reports_unknown_runs() {
+    let sharer = sharer_on("192.0.2.7");
+    assert!(!sharer.cancel_import(77));
+}
+
+#[test]
+#[cfg(windows)]
+fn unreadable_roots_fail_their_run_status_without_committing() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("sealed");
+    std::fs::create_dir(&root).unwrap();
+
+    let deny = std::process::Command::new("icacls")
+        .arg(&root)
+        .args(["/deny", "*S-1-1-0:(OI)(CI)R"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .unwrap();
+    assert!(deny.success(), "icacls deny failed");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let sharer = sharer_on("192.0.2.7");
+        let started = sharer.import_paths(vec![root.clone()]).await;
+        let run_id = started.run_id.expect("a folder drop starts a run");
+        let statuses = wait_terminated(&sharer, run_id).await;
+        (statuses, sharer.status().running, sharer.roots().len())
+    });
+    let (statuses, running, roots) = result;
+
+    // Lift the denial before the temp dir is cleaned up.
+    let reset = std::process::Command::new("icacls")
+        .arg(&root)
+        .args(["/reset", "/t", "/q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .unwrap();
+    assert!(reset.success(), "icacls reset failed");
+
+    match &statuses[0] {
+        RootRunStatus::Failed(_) => {}
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(!running, "a failed import commits nothing, starts nothing");
+    assert_eq!(roots, 0);
 }

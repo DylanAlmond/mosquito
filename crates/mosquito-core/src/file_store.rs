@@ -53,11 +53,50 @@ pub struct AddFilesOutcome {
     pub failed: Vec<FailedAdd>,
 }
 
+/// Identifier of an imported folder root — a root record.
+/// Kept a distinct newtype so file and root ids can never be swapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct RootId(pub u64);
+
+/// The store's record of an imported folder: where the folder is and how
+/// many files it held when the import's count walk finished (ADR-0005).
+/// Nothing beneath the root is registered on import — its members become
+/// shared files only as they are materialized.
+#[derive(Debug, Clone, Serialize)]
+pub struct RootRecord {
+    pub id: RootId,
+    /// Absolute path of the folder the user imported.
+    pub path: PathBuf,
+    /// Files counted at import time. Lazily-known contents may drift
+    /// from this number afterwards — that is the live-subtree contract.
+    pub file_count: u64,
+}
+
+/// What materializing a root record's folder registered.
+#[derive(Debug, Serialize)]
+pub struct MaterializeOutcome {
+    pub added: Vec<SharedFile>,
+    /// Already registered (folder root + relative path) — the
+    /// idempotency key made them a no-op.
+    pub skipped: u64,
+    pub failed: Vec<FailedAdd>,
+}
+
+/// What removing a root record took with it.
+#[derive(Debug, Serialize)]
+pub struct RootRemoval {
+    pub record: RootRecord,
+    /// Every materialized member swept away with the record.
+    pub files: Vec<SharedFile>,
+}
+
 /// In-memory registry of files currently being shared.
 #[derive(Debug, Default)]
 pub struct FileStore {
     files: Vec<SharedFile>,
     next_id: u64,
+    roots: Vec<RootRecord>,
+    next_root_id: u64,
 }
 
 impl FileStore {
@@ -83,10 +122,7 @@ impl FileStore {
             // A dropped path must not be a link. Following it would
             // escape wherever it points, and a looped link hangs — the
             // same reason links inside a walk are skipped outright.
-            let is_link = std::fs::symlink_metadata(&path)
-                .map(|metadata| metadata.is_symlink())
-                .unwrap_or(false);
-            if is_link {
+            if is_dropped_link(&path) {
                 outcome.failed.push(FailedAdd {
                     path,
                     error: "symlinks can't be shared".into(),
@@ -268,6 +304,198 @@ impl FileStore {
     pub fn clear(&mut self) {
         self.files.clear();
     }
+
+    /// Nothing shared right now: neither registered files nor imported
+    /// root records. A root record alone counts as content.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.roots.is_empty()
+    }
+
+    // -- root records: count-only imports (ADR-0005) ----------------------
+
+    /// Record an imported folder: absolute path plus the file count the
+    /// import's count walk produced. Nothing beneath the root is
+    /// registered here; ids are never reused, even after removal.
+    pub fn commit_root_record(&mut self, path: impl Into<PathBuf>, file_count: u64) -> RootRecord {
+        let record = RootRecord {
+            id: RootId(self.next_root_id),
+            path: path.into(),
+            file_count,
+        };
+        self.next_root_id += 1;
+        self.roots.push(record.clone());
+        record
+    }
+
+    /// Insertion-ordered view of the imported roots.
+    pub fn roots(&self) -> &[RootRecord] {
+        &self.roots
+    }
+
+    /// Remove a root record and every member materialized under it —
+    /// one action, mirroring how folder groups present themselves.
+    pub fn remove_root(&mut self, id: RootId) -> Result<RootRemoval, RemoveError> {
+        let index = self
+            .roots
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or(RemoveError::RootNotFound(id))?;
+        let record = self.roots.remove(index);
+
+        // Members are found by the root record's absolute path — that's
+        // the idempotency key, so removing one record can't miss files
+        // another record for the same folder materialized.
+        let mut remaining = Vec::new();
+        let mut removed = Vec::new();
+        for file in std::mem::take(&mut self.files) {
+            let under_record = file
+                .provenance
+                .as_ref()
+                .is_some_and(|p| p.folder_root == record.path);
+            if under_record {
+                removed.push(file);
+            } else {
+                remaining.push(file);
+            }
+        }
+        self.files = remaining;
+
+        Ok(RootRemoval {
+            record,
+            files: removed,
+        })
+    }
+
+    /// Register the lazily-known direct children of a root record's
+    /// folder (ADR-0005): regular files directly inside it become shared
+    /// files; subfolders stay lazily-known (they materialize on their own
+    /// turn), symlinks are skipped outright, and unreadable entries are
+    /// reported per-entry like any batch add.
+    ///
+    /// Idempotent, keyed by (folder root, relative path): materializing
+    /// twice — or two root records pointing at the same folder — converges
+    /// on one registration per file instead of duplicates.
+    ///
+    /// The error type is [`RemoveError`][crate::error::RemoveError]'s
+    /// RootNotFound variant: materialization's only failure is an unknown
+    /// root id, and "no root record with that id" is one domain error
+    /// whoever asks.
+    pub fn materialize(&mut self, id: RootId) -> Result<MaterializeOutcome, RemoveError> {
+        let root_path = self
+            .roots
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.path.clone())
+            .ok_or(RemoveError::RootNotFound(id))?;
+
+        let mut outcome = MaterializeOutcome {
+            added: Vec::new(),
+            skipped: 0,
+            failed: Vec::new(),
+        };
+
+        let entries = match std::fs::read_dir(&root_path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                outcome.failed.push(FailedAdd {
+                    path: root_path,
+                    error: e.to_string(),
+                });
+                return Ok(outcome);
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    outcome.failed.push(FailedAdd {
+                        path: root_path.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let path = entry.path();
+
+            // Checked *before* is_dir, like the walk in add_paths: std
+            // reports junctions as symlinks on Windows, so this skips
+            // both without ever following them.
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(e) => {
+                    outcome.failed.push(FailedAdd {
+                        path,
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                // Lazily-known: becomes visible by expanding, which
+                // materializes its own direct children.
+                continue;
+            }
+            if !file_type.is_file() {
+                outcome.failed.push(FailedAdd {
+                    path,
+                    error: "not a regular file".into(),
+                });
+                continue;
+            }
+
+            let relative_path = match relative_path_string(&root_path, &path) {
+                Some(relative_path) => relative_path,
+                None => {
+                    outcome.failed.push(FailedAdd {
+                        path,
+                        error: "path escapes its folder root".into(),
+                    });
+                    continue;
+                }
+            };
+
+            // Idempotency key: (folder root, relative path). Concurrent or
+            // repeated materializations of the same directory — including
+            // through a duplicate root record — must converge.
+            let already_registered = self.files.iter().any(|f| {
+                f.provenance
+                    .as_ref()
+                    .is_some_and(|p| p.folder_root == root_path && p.relative_path == relative_path)
+            });
+            if already_registered {
+                outcome.skipped += 1;
+                continue;
+            }
+
+            match self.insert(
+                path.clone(),
+                Some(FolderProvenance {
+                    folder_root: root_path.clone(),
+                    relative_path,
+                }),
+            ) {
+                Ok(file) => outcome.added.push(file),
+                Err(e) => outcome.failed.push(FailedAdd {
+                    path,
+                    error: e.to_string(),
+                }),
+            }
+        }
+
+        Ok(outcome)
+    }
+}
+
+/// Whether a dropped path is a link (symlink or junction on Windows).
+/// Links are never followed: not as drop roots, not inside walks.
+pub(crate) fn is_dropped_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_symlink())
+        .unwrap_or(false)
 }
 
 /// Path below `root`, forward-slash-joined (`sub/b.txt`) — the format
@@ -286,19 +514,8 @@ fn relative_path_string(root: &Path, path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::path::Path;
+    use crate::test_support::disk::{make_file, nested_tree};
     use tempfile::TempDir;
-
-    /// Helper: create a real file with the given contents inside a temp dir.
-    fn make_file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::File::create(&path)
-            .unwrap()
-            .write_all(contents)
-            .unwrap();
-        path
-    }
 
     #[test]
     fn new_store_is_empty() {
@@ -605,6 +822,220 @@ mod tests {
         store.clear();
 
         assert!(store.list().is_empty());
+    }
+
+    // -- root records: count-only imports (ADR-0005) ----------------------
+
+    #[test]
+    fn committed_root_records_carry_path_count_and_sequential_ids() {
+        let dir = TempDir::new().unwrap();
+        let mut store = FileStore::new();
+        store.add(make_file(dir.path(), "loose.txt", b"l")).unwrap();
+
+        let root = dir.path().join("photos");
+        std::fs::create_dir(&root).unwrap();
+        let first = store.commit_root_record(&root, 3);
+        let second = store.commit_root_record(dir.path().join("other"), 0);
+
+        assert_eq!(first.id, RootId(0));
+        assert_eq!(second.id, RootId(1));
+        assert_eq!(first.path, root);
+        assert_eq!(first.file_count, 3);
+
+        // Insertion-ordered view, loose files untouched.
+        assert_eq!(store.roots().len(), 2);
+        assert_eq!(store.roots()[0].id, RootId(0));
+        assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn commit_root_record_with_no_files_is_recorded() {
+        let dir = TempDir::new().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(empty, 0);
+
+        assert_eq!(record.file_count, 0);
+        // A root record alone counts as content — a shareable, startable state.
+        assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn root_ids_are_never_reused_after_root_removal() {
+        let dir = TempDir::new().unwrap();
+        let mut store = FileStore::new();
+        let root = dir.path().join("a");
+        std::fs::create_dir(&root).unwrap();
+        let first = store.commit_root_record(root, 0);
+        store.remove_root(first.id).unwrap();
+        let second = store.commit_root_record(dir.path().join("b"), 0);
+
+        assert_eq!(second.id, RootId(1));
+    }
+
+    #[test]
+    fn remove_unknown_root_is_an_error() {
+        let mut store = FileStore::new();
+        assert!(matches!(
+            store.remove_root(RootId(42)),
+            Err(RemoveError::RootNotFound(RootId(42)))
+        ));
+    }
+
+    #[test]
+    fn remove_root_sweeps_its_materialized_members() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+        let loose = make_file(dir.path(), "loose.txt", b"l");
+
+        let mut store = FileStore::new();
+        store.add(&loose).unwrap();
+        let record = store.commit_root_record(&root, 2);
+        let materialized = store.materialize(record.id).unwrap();
+        assert_eq!(materialized.added.len(), 1);
+
+        let removal = store.remove_root(record.id).unwrap();
+
+        assert_eq!(removal.record.id, record.id);
+        assert_eq!(removal.files.len(), 1);
+        assert!(store.roots().is_empty());
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].name, "loose.txt");
+        assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn materialize_registers_direct_children_with_provenance() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("flat");
+        std::fs::create_dir(&root).unwrap();
+        make_file(&root, "a.txt", b"a");
+        make_file(&root, "c.txt", b"c");
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 2);
+        let outcome = store.materialize(record.id).unwrap();
+
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(outcome.added.len(), 2);
+        let a = outcome.added.iter().find(|f| f.name == "a.txt").unwrap();
+        let provenance = a.provenance.clone().expect("folder member");
+        assert_eq!(provenance.folder_root, root);
+        assert_eq!(provenance.relative_path, "a.txt");
+    }
+
+    #[test]
+    fn materialize_is_depth_lazy_direct_children_only() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path()); // a.txt at depth 0, b.txt at depth 1
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 2);
+        let outcome = store.materialize(record.id).unwrap();
+
+        // Deeper levels materialize on their own turn.
+        assert_eq!(outcome.added.len(), 1);
+        assert_eq!(outcome.added[0].name, "a.txt");
+    }
+
+    #[test]
+    fn materialize_is_idempotent_keyed_by_folder_root_and_relative_path() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 2);
+        let first = store.materialize(record.id).unwrap();
+        let second = store.materialize(record.id).unwrap();
+
+        assert_eq!(first.added.len(), 1);
+        assert_eq!(second.added.len(), 0);
+        assert_eq!(second.skipped, 1);
+        assert_eq!(store.list().len(), 1, "no duplicates in the store");
+    }
+
+    #[test]
+    fn duplicate_root_records_resolve_to_the_same_registered_files() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+
+        let mut store = FileStore::new();
+        let first = store.commit_root_record(&root, 2);
+        let second = store.commit_root_record(&root, 2);
+
+        store.materialize(first.id).unwrap();
+        let again = store.materialize(second.id).unwrap();
+
+        // Same disk files the second root resolves to — one registration
+        // per (folder root, relative path), no duplicated memory.
+        assert_eq!(again.added.len(), 0);
+        assert_eq!(again.skipped, 1);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.roots().len(), 2);
+    }
+
+    #[test]
+    fn materialize_after_root_removal_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 2);
+        store.remove_root(record.id).unwrap();
+
+        assert!(matches!(
+            store.materialize(record.id),
+            Err(RemoveError::RootNotFound(RootId(_)))
+        ));
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn materialize_skips_symlinks_and_subfolders_silently() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        make_file(&root, "real.txt", b"r");
+        make_file(&root.join("sub"), "b.txt", b"b");
+        let target = make_file(dir.path(), "outside.txt", b"top secret");
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 1);
+
+        // Creating symlinks unprivileged needs developer mode on Windows,
+        // or root on some CI images — skip there rather than fail.
+        #[cfg(windows)]
+        let link = match std::os::windows::fs::symlink_file(&target, root.join("link.txt")) {
+            Ok(()) => root.join("link.txt"),
+            Err(_) => return, // can't create symlinks in this environment
+        };
+        #[cfg(unix)]
+        let link = match std::os::unix::fs::symlink(&target, root.join("link.txt")) {
+            Ok(()) => root.join("link.txt"),
+            Err(_) => return,
+        };
+        #[cfg(not(any(windows, unix)))]
+        let _link_unused = ();
+
+        let outcome = store.materialize(record.id).unwrap();
+
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let names: Vec<_> = outcome.added.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["real.txt"]);
+        let _ = link;
+    }
+
+    #[test]
+    fn materialize_counts_as_content() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 2);
+        store.remove_root(record.id).unwrap();
+        assert!(store.is_empty());
     }
 
     #[test]

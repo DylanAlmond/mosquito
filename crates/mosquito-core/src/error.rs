@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::FileId;
+use crate::file_store::RootId;
 
 #[derive(Debug, Error)]
 pub enum AddFileError {
@@ -18,6 +19,8 @@ pub enum AddFileError {
 pub enum RemoveError {
     #[error("no shared file with id {0}")]
     NotFound(FileId),
+    #[error("no root record with id {0}")]
+    RootNotFound(RootId),
 }
 
 #[derive(Debug, Error)]
@@ -39,6 +42,12 @@ pub enum SharerError {
 }
 
 impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for RootId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use mosquito_core::{qr_svg, AddFilesOutcome, FileId, ServerInfo, SharedFile, Sharer};
+use mosquito_core::{
+    qr_svg, AddFilesOutcome, FileId, ImportRunSnapshot, ImportStartOutcome, MaterializeOutcome,
+    RootId, RootRecord, RootRemoval, ServerInfo, SharedFile, Sharer,
+};
 use tauri::State;
 
 use crate::PendingShareFiles;
@@ -21,7 +24,54 @@ pub async fn add_files(
 
 #[tauri::command]
 pub async fn remove_file(sharer: State<'_, Sharer>, id: u64) -> Result<SharedFile, String> {
-    sharer.remove_file(FileId(id)).map_err(|e| e.to_string())
+    sharer
+        .remove_file(FileId(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// -- import runs: count-only folder imports (ADR-0005/0007) ------------
+
+#[tauri::command]
+pub async fn import_paths(
+    sharer: State<'_, Sharer>,
+    paths: Vec<String>,
+) -> Result<ImportStartOutcome, String> {
+    let paths = paths.into_iter().map(PathBuf::from).collect();
+    Ok(sharer.import_paths(paths).await)
+}
+
+#[tauri::command]
+pub async fn cancel_import(sharer: State<'_, Sharer>, run_id: u64) -> Result<bool, String> {
+    Ok(sharer.cancel_import(run_id))
+}
+
+#[tauri::command]
+pub async fn import_runs(sharer: State<'_, Sharer>) -> Result<Vec<ImportRunSnapshot>, String> {
+    Ok(sharer.import_run_status())
+}
+
+#[tauri::command]
+pub async fn list_roots(sharer: State<'_, Sharer>) -> Result<Vec<RootRecord>, String> {
+    Ok(sharer.roots())
+}
+
+#[tauri::command]
+pub async fn materialize_root(
+    sharer: State<'_, Sharer>,
+    root_id: u64,
+) -> Result<MaterializeOutcome, String> {
+    sharer
+        .materialize_root(RootId(root_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_root(sharer: State<'_, Sharer>, root_id: u64) -> Result<RootRemoval, String> {
+    sharer
+        .remove_root(RootId(root_id))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

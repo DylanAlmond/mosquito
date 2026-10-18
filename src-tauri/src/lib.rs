@@ -99,6 +99,12 @@ pub fn run() {
                 get_qr,
                 take_pending_share_paths,
                 register_context_menu,
+                import_paths,
+                cancel_import,
+                import_runs,
+                list_roots,
+                materialize_root,
+                remove_root,
                 harness::harness_seed
             ]);
 
@@ -112,7 +118,13 @@ pub fn run() {
         get_server_info,
         get_qr,
         take_pending_share_paths,
-        register_context_menu
+        register_context_menu,
+        import_paths,
+        cancel_import,
+        import_runs,
+        list_roots,
+        materialize_root,
+        remove_root
     ]);
 
     // Belt and braces: `pilot` is for dev tooling only. Release builds
