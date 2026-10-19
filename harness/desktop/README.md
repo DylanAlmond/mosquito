@@ -78,11 +78,13 @@ the useful stable handles on the list are:
 
 The folder-tree selectors are the stable test contract for this UI
 (issue #8): scenarios target attributes, never layout or snapshot
-refs, so the DOM can change without harness breakage. Since #23 the
-seed cannot produce folder rows anymore (root records don't
-materialize until #24), so the sweep drives the loose-row parts of
-the table; the folder selectors stay the contract for when #24
-reintroduces them. The web
+refs, so the DOM can change without harness breakage. From #24 on,
+the record's group row materializes through its own expansion, so the
+sweep drives the loose-row parts of the table first, then the group
+row: #29 closes the sweep with the node pass — the `travel`
+subfolder row's own node checkbox, its covered member standing down,
+and a one-action remove_node sweep that leaves the record alive. The
+web
 harness (`harness/web/README.md`) carries the corresponding contract
 for the served listing — same tree, same wording where the selectors
 match the app's, honest differences where the two implementations
@@ -108,10 +110,14 @@ with `[aria-label^="Cancel import of"]` to cancel) until the root
 record commits and the server auto-starts. The run is far too quick
 to observe for a two-file fixture, so the progress board itself is
 covered by the SharePanel unit tests; the sweep covers the loose rows
-(selection, bulk removal) and the empty-list return. Scenario
-coverage: loose-file rendering and selection, select-all, bulk
-removal, and the share staying up because the imported root record
-still counts as content.
+(selection, bulk removal) and the share staying up because the
+imported root record still counts as content, then the record's own
+cover. Scenario coverage: loose-file rendering and selection,
+select-all, bulk removal (with the record's group deselected first,
+per ADR-0006's node-resolved selection), the group row's expansion,
+the `travel` node checkbox with its covered member inert, and the
+one-action node removal that leaves the record and its updated live
+count in place (#29).
 
 ## Release safety
 

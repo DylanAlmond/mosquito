@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::SharerError;
 use crate::file_store::{
-    AddFilesOutcome, FailedAdd, FileId, FileStore, MaterializeOutcome, RootId, RootRecord,
-    RootRemoval, SharedFile,
+    AddFilesOutcome, FailedAdd, FileId, FileStore, MaterializeOutcome, NodeRemoval, RootId,
+    RootRecord, RootRemoval, SharedFile,
 };
 use crate::import_run::{
     CountFolderError, ImportRun, ImportRunSnapshot, ImportRuns, PROGRESS_EVERY_FILES,
@@ -121,6 +121,21 @@ impl Sharer {
             .remove_root(id)?;
         self.auto_stop_when_empty().await;
         Ok(removal)
+    }
+
+    /// Remove every materialized member under one node address (sub
+    /// path relative to the record). The record survives, so the share
+    /// can never empty through this — no auto-stop check: the empty-sub
+    /// path delegates to `remove_root`, which carries the rule itself.
+    pub async fn remove_node(
+        &self,
+        id: RootId,
+        sub_path: &str,
+    ) -> Result<NodeRemoval, RemoveError> {
+        self.store
+            .lock()
+            .expect("file store not poisoned")
+            .remove_node(id, sub_path)
     }
 
     /// The imported root records, insertion-ordered.

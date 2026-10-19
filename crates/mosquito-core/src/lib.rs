@@ -15,8 +15,8 @@ mod test_support;
 
 pub use error::{AddFileError, QrError, RemoveError, SharerError};
 pub use file_store::{
-    AddFilesOutcome, FailedAdd, FileId, FileStore, FolderProvenance, MaterializeOutcome, RootId,
-    RootRecord, RootRemoval, SharedFile,
+    AddFilesOutcome, FailedAdd, FileId, FileStore, FolderProvenance, MaterializeOutcome,
+    NodeRemoval, RootId, RootRecord, RootRemoval, SharedFile,
 };
 pub use import_run::{ImportRunSnapshot, RootRun, RootRunStatus, RunId};
 pub use lan::{LanAddress, SystemLanAddress};

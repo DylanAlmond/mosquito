@@ -599,6 +599,38 @@ async fn removing_the_last_file_auto_stops_the_server() {
 }
 
 #[tokio::test]
+async fn removing_a_node_sweeps_its_registered_members_and_keeps_the_share_up() {
+    let dir = TempDir::new().unwrap();
+    let root = make_nested_tree(dir.path()); // a.txt, sub/b.txt
+
+    let sharer = sharer_on("192.0.2.7");
+    let started = sharer.import_paths(vec![root.clone()]).await;
+    let run_id = started.run_id.expect("a folder drop starts a run");
+    wait_terminated(&sharer, run_id).await;
+    let root_id = sharer.roots()[0].id;
+    let counted = sharer.list_top().roots[0].file_count; // the walk's 2
+    assert_eq!(counted, 2);
+
+    // Views materialize (ADR-0005): the root page registers a.txt, the
+    // sub page registers b.txt on its own turn.
+    sharer.list_page(root_id, "", 0, 200).unwrap();
+    sharer.list_page(root_id, "sub", 0, 200).unwrap();
+    assert_eq!(sharer.files().len(), 2);
+
+    let removal = sharer.remove_node(root_id, "sub").await.unwrap();
+    assert_eq!(removal.files.len(), 1);
+
+    // The record survives, so the share stays up — the sweep took only
+    // the sub's registered member, the record's live count updated by it.
+    assert!(sharer.status().running);
+    assert_eq!(sharer.files().len(), 1);
+    assert_eq!(sharer.list_top().roots[0].file_count, counted - 1);
+    assert_eq!(sharer.list_top().roots.len(), 1);
+
+    sharer.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn duplicate_imports_of_the_same_folder_do_not_duplicate_registrations() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("flat");

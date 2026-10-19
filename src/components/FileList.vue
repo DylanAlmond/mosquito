@@ -6,7 +6,7 @@ import CheckedIcon from '../assets/square-rounded-check.svg';
 import UncheckedIcon from '../assets/square-rounded.svg';
 import TrashIcon from '../assets/trash-x.svg';
 import { useSharer } from '../composables/useSharer';
-import type { FailedAdd, NodePageRow, RootRow, SharedFile } from '../types';
+import type { FailedAdd, NodeAddress, NodePageRow, RootRow, SharedFile } from '../types';
 
 const { loose, roots, busy, remove, removeSelection, contentVersion, error: shareError } =
   useSharer();
@@ -27,11 +27,21 @@ type PageWindow = {
   has_more: boolean;
 };
 
-/// Selection — registered file ids and whole lazily-known root groups
-/// (issue #24): the root checkbox selects the group, whose removal
-/// takes the record plus every materialized member in one action.
+/// Selection — registered file ids and node addresses (issue #29): the
+/// root checkbox selects the group, whose removal takes the record plus
+/// every materialized member in one action; a subfolder's node checkbox
+/// selects that node the same way. Node picks ride on the record id +
+/// sub path — never member file ids, never checking-as-materializing.
 const selectedIds = ref<number[]>([]);
-const selectedRootIds = ref<number[]>([]);
+
+/// Node selections by their stable identity: record ids are never
+/// reused (even after removal), so the address key survives
+/// first-appearance re-keying that display names go through.
+const selectedNodes = ref(new Map<string, NodeAddress>());
+
+function nodeSelKey(rootId: number, subPath: string) {
+  return `${rootId}\u0000${subPath}`;
+}
 
 /// Expansion is UI-held state keyed by the root's disambiguated key +
 /// subfolder path (ADR-0002's rule kept): survives re-reads, resets
@@ -54,9 +64,19 @@ interface FolderRef {
   isRoot: boolean;
 }
 
-/// A rendered row of the flat list.
+/// A rendered row of the flat list. File rows carry their ancestor
+/// chain (root record → its own folder, node addresses root→parent):
+/// the leaf of coverage logic and removal splitting alike — a picked
+/// folder owns exactly the picked members whose chain contains it.
 type Row =
-  | { kind: 'file'; file: SharedFile; depth: number; shade: Shade; rootId: number | null }
+  | {
+      kind: 'file';
+      file: SharedFile;
+      depth: number;
+      shade: Shade;
+      rootId: number | null;
+      chain: NodeAddress[];
+    }
   | { kind: 'folder'; folder: FolderRef; depth: number; shade: Shade }
   | { kind: 'marker'; failures: FailedAdd[]; depth: number; shade: Shade };
 
@@ -220,8 +240,16 @@ function expandedRegionShade(depth: number): Shade {
 
 /// The rows a node's page feeds render: materialized file rows,
 /// lazily-known subfolder rows (recursively, when expanded), and the
-/// node's inline materialization-failure marker last.
-function folderRows(folder: FolderRef, depth: number, parentShade: Shade, out: Row[]) {
+/// node's inline materialization-failure marker last. `ancestors` —
+/// node addresses root→parent — rides along so file rows know which
+/// seeds cover them and removal can sweep them.
+function folderRows(
+  folder: FolderRef,
+  depth: number,
+  parentShade: Shade,
+  ancestors: NodeAddress[],
+  out: Row[]
+) {
   const open = isExpanded(folder);
   const shade: Shade = open ? expandedRegionShade(depth) : parentShade;
   out.push({ kind: 'folder', folder, depth, shade });
@@ -232,6 +260,9 @@ function folderRows(folder: FolderRef, depth: number, parentShade: Shade, out: R
   if (!state) return;
 
   const regionShade = expandedRegionShade(depth);
+  // The member chain: this folder's own address ends it — a member's
+  // ancestors include the folder it sits in.
+  const chain = [...ancestors, { rootId: folder.root.id, subPath: folder.subPath }];
   for (const pageRow of state.rows) {
     if (pageRow.kind === 'file') {
       out.push({
@@ -239,7 +270,8 @@ function folderRows(folder: FolderRef, depth: number, parentShade: Shade, out: R
         file: pageRow.file,
         depth: depth + 1,
         shade: regionShade,
-        rootId: folder.root.id
+        rootId: folder.root.id,
+        chain
       });
     } else {
       const subPath = folder.subPath ? `${folder.subPath}/${pageRow.name}` : pageRow.name;
@@ -253,6 +285,7 @@ function folderRows(folder: FolderRef, depth: number, parentShade: Shade, out: R
         },
         depth + 1,
         regionShade,
+        chain,
         out
       );
     }
@@ -269,10 +302,10 @@ function folderRows(folder: FolderRef, depth: number, parentShade: Shade, out: R
 const rows = computed<Row[]>(() => {
   const out: Row[] = [];
   for (const file of loose.value) {
-    out.push({ kind: 'file', file, depth: 0, shade: 0, rootId: null });
+    out.push({ kind: 'file', file, depth: 0, shade: 0, rootId: null, chain: [] });
   }
   for (const root of roots.value) {
-    folderRows(rootFolder(root), 0, 0, out);
+    folderRows(rootFolder(root), 0, 0, [], out);
   }
   return out;
 });
@@ -289,13 +322,14 @@ const renderedFileIds = computed(() =>
   rows.value.flatMap((row) => (row.kind === 'file' ? [row.file.id] : []))
 );
 
-/// Which root group (if any) a known file id belongs to — the root
-/// checkbox's mixed state reads from it, and removal skips ids a group
-/// removal already sweeps.
-const fileOwnerRoot = computed(() => {
-  const owners = new Map<number, number>();
+/// Which node chain (root record → its own folder) a known file id
+/// hangs under — the checkbox states read click coverage from it, and
+/// removal splitting sweeps ids a node removal already covers. Loose
+/// files carry no chain.
+const fileOwners = computed(() => {
+  const owners = new Map<number, NodeAddress[]>();
   for (const row of rows.value) {
-    if (row.kind === 'file' && row.rootId !== null) owners.set(row.file.id, row.rootId);
+    if (row.kind === 'file') owners.set(row.file.id, row.chain);
   }
   return owners;
 });
@@ -307,9 +341,13 @@ watch(renderedFileIds, (ids) => {
 });
 
 watch(roots, (nextRoots) => {
-  if (selectedRootIds.value.some((id) => !nextRoots.some((root) => root.id === id))) {
-    selectedRootIds.value = selectedRootIds.value.filter((id) =>
-      nextRoots.some((root) => root.id === id)
+  // Removals prune their records' node selections; the record's own
+  // removal (via remove_root) can only come from user actions and run
+  // outcomes, so a selection must never outlive its record.
+  const ids = new Set(nextRoots.map((root) => root.id));
+  if ([...selectedNodes.value.values()].some((node) => !ids.has(node.rootId))) {
+    selectedNodes.value = new Map(
+      [...selectedNodes.value].filter(([, node]) => ids.has(node.rootId))
     );
   }
 });
@@ -318,22 +356,39 @@ function isSelected(id: number) {
   return selectedIds.value.includes(id);
 }
 
-/// Whether a root group's whole pick covers a file row: the group owns
-/// its subtree until it is unchecked (ADR-0006 — selection resolves
-/// through the node), so a covered member shows the tick and its own
-/// checkbox goes inert — flipping a covered member off isn't
-/// representable (there are no exclusions to a node selection); the
-/// group checkbox is the way to label finer intent. Loose files have no
-/// owner and are never covered.
-function ownerGroupSelected(id: number): boolean {
-  const owner = fileOwnerRoot.value.get(id);
-  return owner !== undefined && selectedRootIds.value.includes(owner);
+/// Whether one node address is a selected ancestor of a row chain: the
+/// group rule (ADR-0006 — selection resolves through the node) carried
+/// to every depth. A covered row shows the tick on the selection's
+/// behalf and its own checkbox goes inert:
+/// flipping a covered member off isn't representable (there are no
+/// exclusions to a node selection); the covering checkbox is the way
+/// to label finer intent. Files with no chain are never covered.
+function isCovered(chain: NodeAddress[]): boolean {
+  return chain.some((address) =>
+    selectedNodes.value.has(nodeSelKey(address.rootId, address.subPath))
+  );
 }
 
-/// The tick a rendered file row shows: its own pick, or the group's
-/// whole pick over it.
+/// Whether the folder row itself is covered — an ancestor node is
+/// selected above it — derived from addresses, not rendering order. A
+/// record's own node has no ancestors: the root selection shows on its
+/// own checkbox, never as coverage of it.
+function isCoveredFolder(folder: FolderRef): boolean {
+  if (folder.subPath === '') return false;
+  if (selectedNodes.value.has(nodeSelKey(folder.root.id, ''))) return true;
+  const segments = folder.subPath.split('/');
+  for (let end = 1; end < segments.length; end += 1) {
+    if (selectedNodes.value.has(nodeSelKey(folder.root.id, segments.slice(0, end).join('/')))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The tick a rendered file row shows: its own pick, or the covering
+/// selection's.
 function rowSelected(id: number): boolean {
-  return isSelected(id) || ownerGroupSelected(id);
+  return isSelected(id) || isCovered(fileOwners.value.get(id) ?? []);
 }
 
 /// Toggle one member's own pick — covered members are inert: the click
@@ -341,22 +396,54 @@ function rowSelected(id: number): boolean {
 function toggleFile(id: number) {
   if (isSelected(id)) {
     selectedIds.value = selectedIds.value.filter((selectedId) => selectedId !== id);
-  } else if (!ownerGroupSelected(id)) {
+  } else if (!isCovered(fileOwners.value.get(id) ?? [])) {
     selectedIds.value = [...selectedIds.value, id];
   }
 }
 
-const rootChecks = computed(() => {
+/// Checkbox states for every rendered folder row — root group and lazy
+/// subfolder alike (issue #29): true when the node itself is selected
+/// or an ancestor's selection covers it, mixed when some rendered
+/// member participates on its own (a member's own pick, or a picked
+/// node within), false otherwise. Member and node picks never turn
+/// each other on; the state only ever mirrors the selection — the same
+/// rule the receiver page's script derives from addresses.
+const nodeChecks = computed(() => {
   const states = new Map<string, CheckState>();
-  for (const root of roots.value) {
-    if (selectedRootIds.value.includes(root.id)) {
-      states.set(root.key, 'checked');
-    } else {
-      const memberPicked = [...fileOwnerRoot.value.entries()].some(
-        ([id, ownerRoot]) => ownerRoot === root.id && isSelected(id)
-      );
-      states.set(root.key, memberPicked ? 'mixed' : 'unchecked');
+  const allRows = rows.value;
+  for (let index = 0; index < allRows.length; index += 1) {
+    const row = allRows[index];
+    if (row.kind !== 'folder') continue;
+    const folder = row.folder;
+
+    if (
+      selectedNodes.value.has(nodeSelKey(folder.root.id, folder.subPath)) ||
+      isCoveredFolder(folder)
+    ) {
+      states.set(folder.key, 'checked');
+      continue;
     }
+
+    // Rendered members deeper than this row until the next shallower
+    // one: participation on their own keeps the flat-tree walk honest —
+    // covered members carry no own pick, so they never mix a folder.
+    let memberPicked = false;
+    depth: for (let later = index + 1; later < allRows.length; later += 1) {
+      const deeper = allRows[later];
+      if (deeper.depth === undefined || deeper.depth <= row.depth) break;
+      if (deeper.kind === 'file' && isSelected(deeper.file.id)) {
+        memberPicked = true;
+        break depth;
+      }
+      if (
+        deeper.kind === 'folder' &&
+        selectedNodes.value.has(nodeSelKey(deeper.folder.root.id, deeper.folder.subPath))
+      ) {
+        memberPicked = true;
+        break depth;
+      }
+    }
+    states.set(folder.key, memberPicked ? 'mixed' : 'unchecked');
   }
   return states;
 });
@@ -366,20 +453,40 @@ function checkAria(state: CheckState | undefined) {
   return check === 'checked' ? 'true' : check === 'mixed' ? 'mixed' : 'false';
 }
 
-function toggleRoot(root: RootRow) {
-  if (selectedRootIds.value.includes(root.id)) {
-    // Unchecking the group also drops its members' individual picks —
-    // the group checkbox owns its subtree like it always did
-    // (selection resolves through the node, ADR-0006).
-    const owned = new Set(
-      [...fileOwnerRoot.value]
-        .filter(([, owner]) => owner === root.id)
-        .map(([id]) => id)
+/// Toggle one node's pick — covered rows are inert (the click reaches
+/// here through the whole row too): uncheck the covering selection
+/// instead. Unchecking drops the subtree's member picks and nested
+/// node selections, at address level — beyond what any page has
+/// rendered, the rule the receiver page's uncheck carries.
+function toggleNode(folder: FolderRef) {
+  if (isCoveredFolder(folder)) return;
+  const ownKey = nodeSelKey(folder.root.id, folder.subPath);
+
+  if (selectedNodes.value.has(ownKey)) {
+    const membersUnder = [...fileOwners.value]
+      .filter(([, chain]) =>
+        chain.some(
+          (address) => address.rootId === folder.root.id && address.subPath === folder.subPath
+        )
+      )
+      .map(([id]) => id);
+    selectedIds.value = selectedIds.value.filter((id) => !membersUnder.includes(id));
+
+    const prefix = folder.subPath ? `${folder.subPath}/` : '';
+    selectedNodes.value = new Map(
+      [...selectedNodes.value].filter(
+        ([key, address]) =>
+          // A different record's selection always stays; this record's
+          // own address goes, and for the root '' every nested
+          // selection under it goes with the whole subtree.
+          address.rootId !== folder.root.id ||
+          !(key === ownKey || address.subPath.startsWith(prefix))
+      )
     );
-    selectedIds.value = selectedIds.value.filter((id) => !owned.has(id));
-    selectedRootIds.value = selectedRootIds.value.filter((id) => id !== root.id);
   } else {
-    selectedRootIds.value = [...selectedRootIds.value, root.id];
+    const next = new Map(selectedNodes.value);
+    next.set(ownKey, { rootId: folder.root.id, subPath: folder.subPath });
+    selectedNodes.value = next;
   }
 }
 
@@ -387,23 +494,25 @@ const allSelected = computed(
   () =>
     renderedFileIds.value.length + roots.value.length > 0 &&
     selectedIds.value.length === renderedFileIds.value.length &&
-    selectedRootIds.value.length === roots.value.length
+    roots.value.every((root) => selectedNodes.value.has(nodeSelKey(root.id, '')))
 );
 const someSelected = computed(
-  () => (selectedIds.value.length > 0 || selectedRootIds.value.length > 0) && !allSelected.value
+  () => (selectedIds.value.length > 0 || selectedNodes.value.size > 0) && !allSelected.value
 );
-const selectedCount = computed(() => selectedIds.value.length + selectedRootIds.value.length);
+const selectedCount = computed(() => selectedIds.value.length + selectedNodes.value.size);
 
 function toggleAll() {
   if (allSelected.value) {
     selectedIds.value = [];
-    selectedRootIds.value = [];
+    selectedNodes.value = new Map();
   } else {
-    // Everything the list can see: rendered materialized ids and the
-    // whole lazy groups. Lazily-known rows nobody opened stay out —
+    // Everything the list can see: rendered materialized ids and every
+    // root's node address. Lazily-known rows nobody opened stay out —
     // selection never materializes content it hasn't shown.
     selectedIds.value = [...renderedFileIds.value];
-    selectedRootIds.value = roots.value.map((root) => root.id);
+    selectedNodes.value = new Map(
+      roots.value.map((root) => [nodeSelKey(root.id, ''), { rootId: root.id, subPath: '' }])
+    );
   }
 }
 
@@ -417,19 +526,26 @@ function removeOne(id: number) {
 function removeSelected() {
   if (!selectedCount.value) return;
 
-  const groupIds = new Set(selectedRootIds.value);
-  // Member ids of a removed group are swept by the group's own removal
-  // — the record plus every materialized member as one action.
+  // Snapshot the split before clearing: whole root groups through
+  // remove_root (record plus every materialized member), subfolder
+  // nodes through remove_node (their registered members, record and
+  // count both), and stray ids through remove_file. Member ids under a
+  // selected node are swept by that node's own removal — their chain
+  // holds one of the addresses going away.
+  const selections = [...selectedNodes.value.values()];
+  const rootIds = selections.filter((node) => node.subPath === '').map((node) => node.rootId);
+  const nodes = selections.filter((node) => node.subPath !== '');
+  const resisting = new Set(selectedNodes.value.keys());
   const fileIds = selectedIds.value.filter((id) => {
-    const owner = fileOwnerRoot.value.get(id);
-    return owner === undefined || !groupIds.has(owner);
+    const chain = fileOwners.value.get(id) ?? [];
+    return !chain.some((address) => resisting.has(nodeSelKey(address.rootId, address.subPath)));
   });
 
   selectedIds.value = [];
-  selectedRootIds.value = [];
+  selectedNodes.value = new Map();
 
-  if (groupIds.size > 0 || fileIds.length > 0) {
-    removeSelection(fileIds, [...groupIds]);
+  if (rootIds.length > 0 || nodes.length > 0 || fileIds.length > 0) {
+    removeSelection(fileIds, rootIds, nodes);
   }
 }
 
@@ -554,19 +670,17 @@ function folderCountText(count: number | undefined) {
           :data-depth="String(row.depth)"
         >
           <button
-            v-if="row.folder.isRoot"
             class="checkbox-control"
             type="button"
             role="checkbox"
-            :aria-checked="checkAria(rootChecks.get(row.folder.key))"
+            :aria-checked="checkAria(nodeChecks.get(row.folder.key))"
             :aria-label="`Select or deselect all files in ${row.folder.name}`"
-            :disabled="busy"
-            @click.stop="toggleRoot(row.folder.root)"
+            :disabled="busy || isCoveredFolder(row.folder)"
+            @click.stop="toggleNode(row.folder)"
           >
-            <CheckedIcon v-if="rootChecks.get(row.folder.key) === 'checked'" />
+            <CheckedIcon v-if="nodeChecks.get(row.folder.key) === 'checked'" />
             <UncheckedIcon v-else />
           </button>
-          <span v-else aria-hidden="true" class="checkbox-spacer"></span>
 
           <button
             class="folder-chevron"
@@ -602,7 +716,7 @@ function folderCountText(count: number | undefined) {
             role="checkbox"
             :aria-checked="rowSelected(row.file.id)"
             :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${row.file.name}`"
-            :disabled="busy || ownerGroupSelected(row.file.id)"
+            :disabled="busy || isCovered(fileOwners.get(row.file.id) ?? [])"
             @click.stop="toggleFile(row.file.id)"
           >
             <CheckedIcon v-if="rowSelected(row.file.id)" />

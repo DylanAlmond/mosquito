@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use mosquito_core::{
     qr_svg, AddFilesOutcome, FileId, ImportRunSnapshot, ImportStartOutcome, MaterializeOutcome,
-    NodePage, RootId, RootRecord, RootRemoval, ServerInfo, SharedFile, Sharer, TopListing,
-    LISTING_PAGE_ROWS,
+    NodePage, NodeRemoval, RootId, RootRecord, RootRemoval, ServerInfo, SharedFile, Sharer,
+    TopListing, LISTING_PAGE_ROWS,
 };
 use tauri::State;
 
@@ -94,6 +94,18 @@ pub async fn materialize_root(
 pub async fn remove_root(sharer: State<'_, Sharer>, root_id: u64) -> Result<RootRemoval, String> {
     sharer
         .remove_root(RootId(root_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_node(
+    sharer: State<'_, Sharer>,
+    root_id: u64,
+    sub_path: String,
+) -> Result<NodeRemoval, String> {
+    sharer
+        .remove_node(RootId(root_id), &sub_path)
         .await
         .map_err(|e| e.to_string())
 }

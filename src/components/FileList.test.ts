@@ -210,6 +210,26 @@ describe('FileList (paged feed)', () => {
           rootFiles = rest;
           return { record: { ...record }, files: removedFiles };
         }
+        case 'remove_node': {
+          const rootId = args?.rootId as number;
+          const subPath = args?.subPath as string;
+          if (!rootRecords.some((root) => root.id === rootId)) {
+            throw new Error(`unknown root ${rootId}`);
+          }
+          const prefix = subPath ? `${subPath}/` : '';
+          const sweep = (rootFiles[rootId] ?? []).filter((file) =>
+            file.provenance!.relative_path.startsWith(prefix)
+          );
+          rootFiles[rootId] = (rootFiles[rootId] ?? []).filter(
+            (file) => !file.provenance!.relative_path.startsWith(prefix)
+          );
+          for (const record of rootRecords) {
+            if (record.id === rootId) {
+              record.file_count -= sweep.length;
+            }
+          }
+          return { files: sweep };
+        }
         default:
           throw new Error(`unexpected command ${command}`);
       }
@@ -261,7 +281,7 @@ describe('FileList (paged feed)', () => {
     expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'sunsets', 'Docs']);
   });
 
-  it('lazy-folder rows expand too — their page fetches with the sub path and carries no checkbox', async () => {
+  it('lazy-folder rows expand too — their page fetches with the sub path and carries its node checkbox', async () => {
     const wrapper = mounted();
 
     await expand(folderRow(wrapper, 'Photos')!);
@@ -283,10 +303,16 @@ describe('FileList (paged feed)', () => {
       'Docs'
     ]);
 
-    // Lazily-known content is expandable only: no group checkbox and no
-    // per-row delete on the lazy row itself.
+    // Lazily-known content is expandable and select-through-the-node
+    // (issue #29): its row carries its own node checkbox — unchecked
+    // until its node is picked — and no per-row delete.
     const sunsets = folderRow(wrapper, 'sunsets')!;
-    expect(sunsets.find('[role="checkbox"]').exists()).toBe(false);
+    expect(sunsets.find('[role="checkbox"]').exists()).toBe(true);
+    expect(
+      sunsets
+        .find('[aria-label^="Select or deselect all files in sunsets"]')
+        .attributes('aria-checked')
+    ).toBe('false');
     expect(sunsets.text()).not.toContain('files');
   });
 
@@ -549,6 +575,123 @@ describe('FileList (paged feed)', () => {
     const removedRoots = invokes('remove_root').map((call) => (call[1] as { rootId: number }).rootId);
     expect(removedRoots).toEqual([12]);
     expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Docs']);
+  });
+
+  it('a subfolder row carries its own node checkbox; selecting it routes delete through remove_node alone', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    const sunsetsBox = sunsets.find('[aria-label^="Select or deselect all files in sunsets"]');
+
+    // The record reads mixed while a nested node participates on its own.
+    await sunsetsBox.trigger('click');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('true');
+    expect(photos.find('[aria-checked]').attributes('aria-checked')).toBe('mixed');
+
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_node', { rootId: 10, subPath: 'sunsets' });
+    expect(invokes('remove_root')).toHaveLength(0);
+    // The subtree's materialized members ride the node's own removal —
+    // never their individual remove_file calls.
+    expect(invokes('remove_file')).toHaveLength(0);
+  });
+
+  it('checking a subfolder covers its rendered members inertly, and unchecking releases them', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    // Every rendered member under the node carries its tick, inert.
+    const covered = wrapper.findAll('.file-row.is-selected');
+    expect(covered.map((row) => row.find('.file-name').text())).toEqual(['dune.jpg', 'shore.jpg']);
+    covered.forEach((row) => {
+      const checkbox = row.find('[role="checkbox"]');
+      expect(checkbox.attributes('aria-checked')).toBe('true');
+      expect(checkbox.attributes('disabled')).toBeDefined();
+    });
+
+    // A click on a covered member changes nothing (the node owns it).
+    await covered[0]!.trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(2);
+
+    // Unchecking releases the subtree.
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+    expect(wrapper.findAll('.file-row [role="checkbox"][disabled]')).toHaveLength(0);
+  });
+
+  it('a checked root group covers the rendered subfolder row, which stands down until unchecked', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+
+    // The root's tick reaches the subfolder row too — inert there, like
+    // every covered member, until the group is unchecked.
+    const sunsetsBox = sunsets.find('[aria-label^="Select or deselect all files in sunsets"]');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('true');
+    expect(sunsetsBox.attributes('disabled')).toBeDefined();
+
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('false');
+    expect(sunsetsBox.attributes('disabled')).toBeUndefined();
+  });
+
+  it('a node picked beneath its own checked root sweeps with the record: no double removal', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    // The node pick first, then the record's own checkbox over it.
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    // The record's sweep takes the whole tree — the follow-up remove_node
+    // would answer not-found for the already-gone record.
+    expect(invokes('remove_root')).toHaveLength(1);
+    expect(invokes('remove_node')).toHaveLength(0);
+    expect(invokes('remove_file')).toHaveLength(0);
+  });
+
+  it('unchecking a node stands its nested node picks down with it', async () => {
+    // A deeper member makes `sunsets` derive its own lazy `night` row.
+    standardBoard();
+    const moon = member(24, PHOTOS, 'sunsets/night/moon.jpg');
+    rootFiles[10] = [...(rootFiles[10] ?? []), moon];
+
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+    await expand(folderRow(wrapper, 'night')!);
+
+    // The nested pick first, then the covering parent over it.
+    const night = folderRow(wrapper, 'night')!;
+    await night.find('[aria-label^="Select or deselect all files in night"]').trigger('click');
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    // The parent's uncheck drops the nested selection too — at address
+    // level, matching the receiver page's uncheck rule.
+    const nightBox = night.find('[aria-label^="Select or deselect all files in night"]');
+    expect(nightBox.attributes('aria-checked')).toBe('false');
+    expect(nightBox.attributes('disabled')).toBeUndefined();
   });
 
   it('per-row delete removes exactly that materialized member', async () => {

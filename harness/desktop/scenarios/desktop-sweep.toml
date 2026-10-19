@@ -8,9 +8,12 @@
 # background import run and commits a root record — with no rows here,
 # because the desktop list browses root records only from #24 onward.
 # The sweep therefore exercises the loose rows (rendering, selection,
-# bulk removal) and the empty-list return; the folder import itself is
-# validated by the count walk in the core suite plus the progress board
-# in the SharePanel unit tests.
+# bulk removal) and the empty-list return, and closes with the node
+# selection pass (issue #29): the `travel` subfolder row carries its own
+# node checkbox, its covered member goes inert, and one remove_node
+# action sweeps exactly that subtree while the record itself survives.
+# The folder import itself is validated by the count walk in the core
+# suite plus the progress board in the SharePanel unit tests.
 #
 # Targets are CSS attribute selectors, not snapshot refs: refs reset on
 # every snapshot and scenarios have no snapshot step. Screenshots land
@@ -96,14 +99,24 @@ path = "test-results/desktop-harness/selections.png"
 selector = ".file-table"
 
 [[step]]
-name = "bulk-remove the selection"
+name = "deselect the record's whole group — the loose sweep must leave it"
+action = "click"
+target = '[aria-label="Select or deselect all files in Photographs"]'
+
+[[step]]
+name = "bulk-remove the loose selection"
 action = "click"
 target = '[aria-label="Delete selected files"]'
 
 [[step]]
-name = "the empty list unmounts once the files are gone"
+name = "the loose rows go; the table stays for the record's group row"
+action = "assert-exists"
+target = '[aria-label="Expand Photographs"]'
+
+[[step]]
+name = "the removal's re-read settles (busy lifts)"
 action = "wait"
-selector = ".file-table"
+selector = '[aria-busy="true"]'
 gone = true
 timeout_ms = 30000
 
@@ -111,6 +124,57 @@ timeout_ms = 30000
 name = "the imported folder still counts as shared, so the card stays up"
 action = "assert-exists"
 target = ".dropzone--active"
+
+# -- the node selection pass (issue #29): the record survived the loose
+# sweep above, so its lazily-known rows come through their own expansion.
+
+[[step]]
+name = "expand the record"
+action = "click"
+target = '[aria-label="Expand Photographs"]'
+
+[[step]]
+name = "the travel subfolder row appears with its own node checkbox"
+action = "wait"
+selector = '[aria-label="Select or deselect all files in travel"]'
+timeout_ms = 30000
+
+[[step]]
+name = "select the travel node"
+action = "click"
+target = '[aria-label="Select or deselect all files in travel"]'
+
+[[step]]
+name = "expand the selected node: its covered member ticks inertly"
+action = "click"
+target = '[aria-label="Expand travel"]'
+
+[[step]]
+name = "the covered member shows the node's tick and stands down"
+action = "wait"
+selector = '[aria-label="Select beach.jpg"][disabled]'
+timeout_ms = 30000
+
+[[step]]
+name = "remove the selected subtree: one remove_node action"
+action = "click"
+target = '[aria-label="Delete selected files"]'
+
+[[step]]
+name = "node removal takes only the subtree: the record's group stays"
+action = "assert-exists"
+target = '[aria-label="Select or deselect all files in Photographs"]'
+
+[[step]]
+name = "the record's live count reflects the removal: sunrise.jpg remains"
+action = "assert-exists"
+target = '[aria-label="Select sunrise.jpg"]'
+
+[[step]]
+name = "capture the post-node-removal state"
+action = "screenshot"
+path = "test-results/desktop-harness/after-node-removal.png"
+selector = ".file-table"
 
 [[step]]
 name = "final state"

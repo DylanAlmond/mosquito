@@ -4,6 +4,8 @@ import type {
   FailedAdd,
   ImportRunSnapshot,
   ImportStartOutcome,
+  NodeAddress,
+  NodeRemoval,
   RootRemoval,
   RootRow,
   RootRun,
@@ -231,13 +233,22 @@ export function useSharer() {
 
   /// One delete action for a mixed selection: whole root groups go
   /// through `remove_root` (record plus every materialized member),
-  /// single file ids through `remove_file`. The caller pre-splits the
-  /// selection: member ids under a removed group are already swept by
-  /// the group's own removal and must not be removed twice.
-  async function removeSelection(ids: number[], rootIds: number[]) {
+  /// subfolder node selections through `remove_node` (their registered
+  /// members; the record and its live count survive), and single file
+  /// ids through `remove_file`. The caller pre-splits: member ids under
+  /// a removed group or node are already swept by that removal and must
+  /// not be removed twice. Node selections whose record is also being
+  /// removed ride the record's own sweep — remove_node would answer
+  /// not-found for the already-gone record otherwise.
+  async function removeSelection(ids: number[], rootIds: number[], nodes: NodeAddress[] = []) {
     await guard(async () => {
+      const rootSet = new Set(rootIds);
+      const standaloneNodes = nodes.filter((node) => !rootSet.has(node.rootId));
       for (const rootId of rootIds) {
         await invoke<RootRemoval>('remove_root', { rootId });
+      }
+      for (const node of standaloneNodes) {
+        await invoke<NodeRemoval>('remove_node', { rootId: node.rootId, subPath: node.subPath });
       }
       for (const id of ids) {
         await invoke<SharedFile>('remove_file', { id });

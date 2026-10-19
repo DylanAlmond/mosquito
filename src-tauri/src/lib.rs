@@ -106,6 +106,7 @@ pub fn run() {
                 list_roots,
                 materialize_root,
                 remove_root,
+                remove_node,
                 harness::harness_seed
             ]);
 
@@ -126,7 +127,8 @@ pub fn run() {
         import_runs,
         list_roots,
         materialize_root,
-        remove_root
+        remove_root,
+        remove_node
     ]);
 
     // Belt and braces: `pilot` is for dev tooling only. Release builds

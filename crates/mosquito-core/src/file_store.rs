@@ -95,6 +95,13 @@ pub struct RootRemoval {
     pub files: Vec<SharedFile>,
 }
 
+/// What removing one node address took with it.
+#[derive(Debug, Serialize)]
+pub struct NodeRemoval {
+    /// The materialized members swept from the subtree.
+    pub files: Vec<SharedFile>,
+}
+
 /// In-memory registry of files currently being shared.
 #[derive(Debug, Default)]
 pub struct FileStore {
@@ -383,6 +390,66 @@ impl FileStore {
             record,
             files: removed,
         })
+    }
+
+    /// Remove every materialized member under one node address (the
+    /// sub path relative to the root record, node-directory rules as in
+    /// any listing request). The root record itself survives — with its
+    /// live count reduced by the members that left — because the share
+    /// still covers the record's whole tree view; parity with removing
+    /// a member file, at subtree grain.
+    ///
+    /// Live-subtree tolerance (ADR-0005): removal takes only what the
+    /// store registered at the time — a later view of that node
+    /// re-materializes per the view-trigger rule, the same way a removed
+    /// member returns if a node page re-registers it. The definitive
+    /// "nothing of this folder in my share" action is the record's own
+    /// removal, not a node's.
+    ///
+    /// An empty sub path addresses the record itself and delegates to
+    /// `remove_root` — the whole sweep, record included.
+    pub fn remove_node(&mut self, id: RootId, sub_path: &str) -> Result<NodeRemoval, RemoveError> {
+        if sub_path.is_empty() {
+            return self.remove_root(id).map(|removal| NodeRemoval {
+                files: removal.files,
+            });
+        }
+
+        let index = self
+            .roots
+            .iter()
+            .position(|record| record.id == id)
+            .ok_or(RemoveError::RootNotFound(id))?;
+        if node_directory(&self.roots[index].path, sub_path).is_none() {
+            return Err(RemoveError::SubPathEscapesRoot(sub_path.to_string()));
+        }
+        let root_path = self.roots[index].path.clone();
+
+        let mut removed = Vec::new();
+        let mut remaining = Vec::new();
+        for file in std::mem::take(&mut self.files) {
+            let under_subtree = file.provenance.as_ref().is_some_and(|provenance| {
+                provenance.folder_root == root_path
+                    && relative_in_subtree(&provenance.relative_path, sub_path)
+            });
+            if under_subtree {
+                removed.push(file);
+            } else {
+                remaining.push(file);
+            }
+        }
+        self.files = remaining;
+
+        // The count is display only (ADR-0008): reducing by the members
+        // the store knew about is the honest update available — the
+        // subtree's unregistered files were part of the walk number, so
+        // the update can miss deeper members. Saturating because a
+        // materialization that happened after the walk may exceed what
+        // the displayed count ever accounted for.
+        let record = &mut self.roots[index];
+        record.file_count = record.file_count.saturating_sub(removed.len() as u64);
+
+        Ok(NodeRemoval { files: removed })
     }
 
     /// Register the lazily-known direct children of `root`'s folder, or
@@ -1156,6 +1223,69 @@ mod tests {
         assert_eq!(store.list().len(), 1);
         assert_eq!(store.list()[0].name, "loose.txt");
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn remove_node_sweeps_exactly_that_subtree_and_updates_the_live_count() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path()); // a.txt, sub/b.txt, sub/deep/c.txt, empty/
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 3);
+        store.materialize(record.id).unwrap(); // direct children only: a.txt
+        store.materialize_at(&root, "sub"); // b.txt on its own turn
+
+        let removal = store.remove_node(record.id, "sub").unwrap();
+
+        // Exactly the registered members under `sub`: the directly shared
+        // member stays put, nothing deeper was ever registered, and the
+        // record survives — with its live count reduced by what left.
+        assert_eq!(removal.files.len(), 1);
+        assert_eq!(
+            removal.files[0].provenance.as_ref().unwrap().relative_path,
+            "sub/b.txt"
+        );
+        assert_eq!(store.roots().len(), 1);
+        assert_eq!(store.roots()[0].file_count, 2);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].name, "a.txt");
+    }
+
+    #[test]
+    fn remove_node_unknown_root_and_escaping_sub_are_errors() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("a");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(root, 0);
+
+        assert!(matches!(
+            store.remove_node(RootId(42), "sub"),
+            Err(RemoveError::RootNotFound(RootId(42)))
+        ));
+        assert!(matches!(
+            store.remove_node(record.id, "../escape"),
+            Err(RemoveError::SubPathEscapesRoot(..))
+        ));
+    }
+
+    #[test]
+    fn remove_node_at_the_record_itself_is_the_whole_root_sweep() {
+        let dir = TempDir::new().unwrap();
+        let root = nested_tree(dir.path());
+
+        let mut store = FileStore::new();
+        let record = store.commit_root_record(&root, 3);
+        store.materialize(record.id).unwrap();
+
+        let removal = store.remove_node(record.id, "").unwrap();
+
+        // The node addressed is the record: the record plus every
+        // materialized member, exactly what the group removal does.
+        assert_eq!(removal.files.len(), 1);
+        assert!(store.roots().is_empty());
+        assert!(store.list().is_empty());
     }
 
     #[test]

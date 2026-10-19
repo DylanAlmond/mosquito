@@ -85,8 +85,21 @@ export interface NodePage {
   has_more: boolean;
 }
 
+/** One node address: the root record id plus its sub path relative to
+    the record. Roots are the empty sub path of the same model. */
+export interface NodeAddress {
+  rootId: number;
+  subPath: string;
+}
+
 /** What removing a root record took with it (record plus materialized members). */
 export interface RootRemoval {
   record: { id: number; path: string; file_count: number };
+  files: SharedFile[];
+}
+
+/** What removing one node address took with it (its registered
+    members; the root record itself survives). */
+export interface NodeRemoval {
   files: SharedFile[];
 }
