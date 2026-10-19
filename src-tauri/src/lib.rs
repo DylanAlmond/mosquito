@@ -90,7 +90,8 @@ pub fn run() {
         builder
             .plugin(tauri_plugin_pilot::init())
             .invoke_handler(tauri::generate_handler![
-                list_files,
+                list_top,
+                list_page,
                 add_files,
                 remove_file,
                 start_server,
@@ -99,12 +100,20 @@ pub fn run() {
                 get_qr,
                 take_pending_share_paths,
                 register_context_menu,
+                import_paths,
+                cancel_import,
+                import_runs,
+                list_roots,
+                materialize_root,
+                remove_root,
+                remove_node,
                 harness::harness_seed
             ]);
 
     #[cfg(any(not(debug_assertions), not(feature = "pilot")))]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        list_files,
+        list_top,
+        list_page,
         add_files,
         remove_file,
         start_server,
@@ -112,7 +121,14 @@ pub fn run() {
         get_server_info,
         get_qr,
         take_pending_share_paths,
-        register_context_menu
+        register_context_menu,
+        import_paths,
+        cancel_import,
+        import_runs,
+        list_roots,
+        materialize_root,
+        remove_root,
+        remove_node
     ]);
 
     // Belt and braces: `pilot` is for dev tooling only. Release builds

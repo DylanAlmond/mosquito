@@ -66,7 +66,7 @@
       button:not(:disabled) {
         cursor: pointer;
       }
-      button:hover {
+      button:not(:disabled):hover {
         opacity: 0.5;
       }
       button svg {
@@ -240,7 +240,7 @@
          The row itself is never a toggle: only its chevron is. */
       .folder-row {
         display: grid;
-        grid-template-columns: 32px 32px minmax(0, 1fr);
+        grid-template-columns: 32px 32px minmax(0, 1fr) auto;
         align-items: center;
         column-gap: 4px;
         min-height: 38px;
@@ -272,6 +272,49 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* Folder rows all carry their node checkbox (issue #27): root
+         records and lazily-known subfolders alike — selection resolves
+         through the node (ADR-0006) and checking one never
+         materializes anything. Only the failure marker keeps the
+         spacer: a count row is never a selection target. */
+      .checkbox-spacer {
+        display: block;
+      }
+      /* The root row's import-time total: display only — showing it
+         materializes nothing (issue #24). */
+      .folder-count {
+        justify-self: end;
+        min-width: 0;
+        padding-left: 8px;
+        opacity: 0.6;
+        font-size: 0.6875rem;
+        font-weight: 400;
+        white-space: nowrap;
+      }
+      /* One node's inline materialization-failure marker (ADR-0005): a
+         count only, sitting inline with the readable rows that did
+         render — see the desktop list's marker, minus its tooltip: no
+         absolute paths ever reach receiver markup. */
+      .materialize-marker {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 4px;
+        min-height: 2.375rem;
+        padding: 0 0.875rem;
+        font-size: 0.8125rem;
+        line-height: 1.2;
+      }
+      .marker-text {
+        margin: 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        opacity: 0.65;
+        font-style: italic;
+        padding-left: calc(16px * var(--depth, 0) + 36px);
       }
       .folder-chevron svg {
         display: block;
@@ -332,50 +375,54 @@
     <script>
       // Progressive enhancement only: with JavaScript off, the
       // checkboxes never appear and the per-file links stay the only
-      // (and fully working) way to download; folders render in their
-      // default expansion (top level open unless over the five-child
-      // budget, subfolders closed).
+      // (and fully working) way to download; the page renders the top
+      // of the listing — loose files plus one row per root record,
+      // open only under the five-children budget the server stamps
+      // (never re-derived here). The script fetches each expanded
+      // node's page from its fragment route and swaps the
+      // server-rendered rows into place, so every visible row is
+      // derived on the server — same code path as the initial render
+      // and the desktop feed (ADR-0006). No tree mirror lives in the
+      // markup.
       (function () {
-        var checkboxes = Array.prototype.slice.call(
-          document.querySelectorAll('[data-select]')
-        );
-        var folderButtons = Array.prototype.slice.call(
-          document.querySelectorAll('[data-subtree]')
-        );
-        var chevrons = Array.prototype.slice.call(
-          document.querySelectorAll('[data-toggle]')
-        );
+        var list = document.querySelector('.file-list');
         var selectAll = document.getElementById('select-all');
         var downloadButton = document.getElementById('download-selected');
-        if (!checkboxes.length || !selectAll || !downloadButton) return;
+        if (!list || !selectAll || !downloadButton) return;
 
+        // How close to the scroller's end a fetch-ahead begins — the
+        // desktop paged feed's threshold (FileList.vue).
+        var FETCH_AHEAD_PX = 120;
+
+        // Selection by registered file id plus node addresses
+        // (root record id + relative sub path, issue #27): file
+        // checkboxes target materialized rows; folder checkboxes
+        // select the node itself — never member file ids — and
+        // checking never materializes anything. Folder selections are
+        // semantic node addresses, so they survive their row
+        // collapsing away until unchecked.
         var selected = {};
+        var selectedNodes = {};
 
-        function selectedIds() {
-          var ids = [];
-          for (var id in selected) {
-            if (selected[id]) ids.push(id);
-          }
-          return ids;
-        }
+        // Expansion state and per-node page state, keyed by the folder
+        // key the server stamps on every folder row and fragment (the
+        // disambiguated root key plus the sub path). Like the desktop,
+        // none of this survives a reload — the server-stamped defaults
+        // are always the starting point.
+        var expanded = {};
+        var pages = {};
 
-        // Folder checkboxes act on the whole subtree — the server lists
-        // every member id (collapsed ones included) in `data-subtree`,
-        // so what is folded away never changes the outcome.
-        function subtreeIds(button) {
-          return button.dataset.subtree.split(',');
-        }
-
-        function subtreeCount(button) {
-          var count = 0;
-          subtreeIds(button).forEach(function (id) {
-            if (selected[id] === true) count += 1;
-          });
-          return count;
-        }
-
-        function setBox(on, checkbox) {
-          checkbox.setAttribute('aria-checked', on ? 'true' : 'false');
+        // The desktop group rule's tri-state (FileList.vue): true,
+        // false, or 'mixed' — mixed lives in the aria state exactly
+        // like the desktop root checkboxes; visually only checked
+        // swaps to the checked icon.
+        function setBox(state, checkbox) {
+          var on = state === true || state === 'checked';
+          var mixed = state === 'mixed';
+          checkbox.setAttribute(
+            'aria-checked',
+            mixed ? 'mixed' : on ? 'true' : 'false'
+          );
           var checked = checkbox.querySelector('.icon-checked');
           var unchecked = checkbox.querySelector('.icon-unchecked');
           if (checked) checked.style.display = on ? '' : 'none';
@@ -384,157 +431,562 @@
           if (li) li.classList.toggle('is-selected', on);
         }
 
-        // Expansion state keyed by folder key (the folder root's
-        // display name — disambiguated among same-named roots — plus
-        // the subfolder path); the server renders the default and each
-        // chevron carries it as aria-expanded. Like the desktop, none
-        // of this survives a page reload — the default state is always
-        // the starting point.
-        var expanded = {};
-        chevrons.forEach(function (chevron) {
-          expanded[chevron.dataset.toggle] =
-            chevron.getAttribute('aria-expanded') === 'true';
-        });
+        // A folder row's own address: the root record id plus the
+        // relative sub path — the semantic form the payload carries.
+        function nodeAddress(row) {
+          return row.dataset.nodeRoot + ':' + row.dataset.nodeSub;
+        }
 
-        // Expand/collapse is chevron-only: a folder row's click never
-        // toggles it. Rows are flat in the DOM in tree order, so one
-        // depth-driven scan decides visibility and shading for
-        // everything — matching the desktop's derivation: a region is
-        // grey when the folder showing it sits at even depth, and a
-        // collapsed folder row falls back to its parent's shade.
-        function applyExpansion() {
-          var stack = [];
-          Array.prototype.forEach.call(
-            document.querySelectorAll('.file-list > li'),
-            function (row) {
-              var isFolder = row.classList.contains('folder-row');
-              if (!isFolder && row.dataset.depth === undefined) {
-                // Loose files sit outside every tree.
-                row.hidden = false;
-                return;
+        // Whether an ancestor folder's node selection covers a row: a
+        // folder row's ancestors are exactly the preceding rows of
+        // strictly-shallower depth, tightened as each shallower row is
+        // met (rows between ancestors are members, not ancestors). The
+        // group rule comes with it: a covered row shows the tick and
+        // its own checkbox goes inert, like the desktop's (FileList.vue)
+        // — node selections have no member exclusions, so flipping a
+        // covered member off isn't representable; the covering folder
+        // is the way to change the scope. Loose rows carry no depth and
+        // are never covered.
+        function coveredByAncestor(row) {
+          if (row.dataset.depth === undefined) return false;
+          var depth = Number(row.dataset.depth);
+          var prev = row.previousElementSibling;
+          while (prev && prev.dataset.depth !== undefined) {
+            var shallower = Number(prev.dataset.depth);
+            if (shallower < depth) {
+              if (
+                prev.classList.contains('folder-row') &&
+                selectedNodes[nodeAddress(prev)] === true
+              ) {
+                return true;
               }
-
-              var depth = Number(row.dataset.depth);
-              while (stack.length && stack[stack.length - 1].depth >= depth) {
-                stack.pop();
-              }
-              var parent = stack[stack.length - 1];
-
-              if (isFolder) {
-                var key = row.dataset.folderKey;
-                var open = expanded[key];
-                // Even depth regions are grey, odd ones fall back — and
-                // a collapsed folder row keeps its parent's shade.
-                var shade = open ? (depth % 2 === 0 ? 1 : 0) : parent ? parent.shade : 0;
-                row.hidden = !!parent && !isEveryAncestorExpanded(stack);
-                row.dataset.shade = String(shade);
-                stack.push({ depth: depth, open: open, shade: shade });
-
-                var chevron = row.querySelector('[data-toggle]');
-                if (chevron) {
-                  chevron.setAttribute('aria-expanded', open ? 'true' : 'false');
-                  chevron.setAttribute(
-                    'aria-label',
-                    (open ? 'Collapse ' : 'Expand ') +
-                      row.querySelector('.folder-name').textContent
-                  );
-                  chevron.classList.toggle('is-collapsed', !open);
-                }
-              } else {
-                row.hidden = !isEveryAncestorExpanded(stack);
-                row.dataset.shade = String(parent ? parent.shade : 0);
-              }
+              depth = shallower;
             }
+            prev = prev.previousElementSibling;
+          }
+          return false;
+        }
+
+        // One folder checkbox's state (the desktop group rule, carried
+        // to subfolders, issue #27): true when the node itself is
+        // selected or an ancestor's selection covers it, mixed when
+        // some rendered member participates on its own — a picked file
+        // row, or a picked subfolder within — false otherwise. Member
+        // picks and node picks never turn each other on; the state
+        // only ever mirrors the selection.
+        function folderState(row) {
+          if (selectedNodes[nodeAddress(row)] || coveredByAncestor(row)) return true;
+          var depth = Number(row.dataset.depth);
+          var member = row.nextElementSibling;
+          while (
+            member &&
+            member.dataset.depth !== undefined &&
+            Number(member.dataset.depth) > depth
+          ) {
+            if (member.classList.contains('file-row')) {
+              var box = member.querySelector('[data-select]');
+              if (box && selected[box.dataset.select] === true) return 'mixed';
+            } else if (
+              Number(member.dataset.depth) === depth + 1 &&
+              folderState(member) !== false
+            ) {
+              return 'mixed';
+            }
+            member = member.nextElementSibling;
+          }
+          return false;
+        }
+
+        // The folder rows stamped as whole records — the roots whose
+        // node selections ride select-all's scope (the desktop group's
+        // rule, rendered rows plus every root).
+        function rootAddresses() {
+          return Array.prototype.map.call(
+            list.querySelectorAll('.folder-row[data-node-sub=""]'),
+            nodeAddress
           );
         }
 
-        // Whether every ancestor still on the scan stack is open —
-        // i.e. whether this row sits inside an expanded region.
-        function isEveryAncestorExpanded(stack) {
-          for (var i = 0; i < stack.length; i += 1) {
-            if (!stack[i].open) return false;
+        // Whether the selection covers that whole scope: every
+        // rendered file row plus every root's node selection —
+        // select-all's "covered" state, computed before its click.
+        function selectionCovers(ids, addresses) {
+          return (
+            ids.length + addresses.length > 0 &&
+            ids.every(function (id) {
+              return selected[id] === true;
+            }) &&
+            addresses.every(function (address) {
+              return selectedNodes[address] === true;
+            })
+          );
+        }
+
+        // Unchecking a folder owns its subtree, like the desktop group
+        // checkbox always did: every rendered member file row's pick
+        // and every nested node selection's address leave with it.
+        function dropNodeSubtree(row) {
+          var rootId = row.dataset.nodeRoot;
+          var sub = row.dataset.nodeSub;
+          var prefix = sub === '' ? '' : sub + '/';
+          var depth = Number(row.dataset.depth);
+          var member = row.nextElementSibling;
+          while (
+            member &&
+            member.dataset.depth !== undefined &&
+            Number(member.dataset.depth) > depth
+          ) {
+            var box = member.querySelector('[data-select]');
+            if (box) delete selected[box.dataset.select];
+            member = member.nextElementSibling;
           }
-          return true;
+          Object.keys(selectedNodes).forEach(function (address) {
+            var colon = address.indexOf(':');
+            if (address.slice(0, colon) !== rootId) return;
+            var otherSub = address.slice(colon + 1);
+            if (otherSub === sub || otherSub.indexOf(prefix) === 0) {
+              delete selectedNodes[address];
+            }
+          });
         }
 
         function refresh() {
-          checkboxes.forEach(function (checkbox) {
-            setBox(selected[checkbox.dataset.select] === true, checkbox);
-          });
-
-          folderButtons.forEach(function (button) {
-            var ids = subtreeIds(button);
-            var count = subtreeCount(button);
-            // Desktop mirrors aria-checked="mixed" for partially
-            // selected subtrees while still showing the unchecked icon.
-            setBox(count === ids.length && ids.length > 0, button);
-            if (count > 0 && count < ids.length) {
-              button.setAttribute('aria-checked', 'mixed');
+          // Every revealed control stays a button with a state
+          // attribute — the script just stops hiding what a plain HTML
+          // page has no use for: per-file checkboxes, the folder rows'
+          // node checkboxes, and chevrons that only exist once a
+          // fragment's rows arrive.
+          Array.prototype.forEach.call(
+            list.querySelectorAll('[data-toggle]'),
+            function (chevron) {
+              chevron.hidden = false;
             }
-          });
-
-          var ids = selectedIds();
-          var every = ids.length > 0 && ids.length === checkboxes.length;
-          setBox(every, selectAll);
-          selectAll.setAttribute(
-            'aria-checked',
-            ids.length === 0 ? 'false' : every ? 'true' : 'mixed'
           );
 
-          // The download button hides when nothing is selected; one
-          // file links directly, several becomes a zip of the selection.
-          if (ids.length === 0) {
+          var fileIds = [];
+          Array.prototype.forEach.call(
+            list.querySelectorAll('[data-select]'),
+            function (checkbox) {
+              checkbox.hidden = false;
+              var covered = coveredByAncestor(checkbox.closest('.file-row'));
+              // A covered member shows the tick on the selection's
+              // behalf and stands down — the covering folder owns it
+              // until it is unchecked (the desktop group rule).
+              checkbox.disabled = covered;
+              setBox(covered || selected[checkbox.dataset.select] === true, checkbox);
+              fileIds.push(checkbox.dataset.select);
+            }
+          );
+
+          // A collapsed subtree prunes its rows: file-id selections the
+          // list can no longer see leave the selection, and select-all
+          // covers exactly the rows that render — the desktop's rule.
+          // Folder selections are node addresses, so they survive the
+          // collapse until unchecked (issue #27).
+          Object.keys(selected).forEach(function (id) {
+            if (fileIds.indexOf(id) === -1) delete selected[id];
+          });
+
+          // The folder checkboxes state themselves from the selection,
+          // never from the last click.
+          Array.prototype.forEach.call(
+            list.querySelectorAll('[data-node-select]'),
+            function (checkbox) {
+              checkbox.hidden = false;
+              var row = checkbox.closest('.folder-row');
+              checkbox.disabled = coveredByAncestor(row);
+              setBox(folderState(row), checkbox);
+            }
+          );
+
+          // Select-all covers exactly the rendered file rows plus every
+          // root's node selection — the desktop's rule.
+          var ids = Object.keys(selected);
+          var every = selectionCovers(fileIds, rootAddresses());
+          var some =
+            (ids.length > 0 || Object.keys(selectedNodes).length > 0) && !every;
+          setBox(every, selectAll);
+          selectAll.setAttribute('aria-checked', some ? 'mixed' : every ? 'true' : 'false');
+
+          // The download button hides when nothing is selected. One
+          // file links directly; one node selection may link its
+          // dedicated node route; anything else — file ids, node
+          // addresses, or both — becomes one merged zip (issue #27).
+          var addrs = Object.keys(selectedNodes);
+          if (ids.length === 0 && addrs.length === 0) {
             downloadButton.classList.remove('is-visible');
             downloadButton.href = '/download/zip';
-          } else if (ids.length === 1) {
+          } else if (ids.length === 1 && addrs.length === 0) {
             downloadButton.classList.add('is-visible');
             downloadButton.href = '/download/' + ids[0];
+          } else if (addrs.length === 1 && ids.length === 0) {
+            downloadButton.classList.add('is-visible');
+            var colon = addrs[0].indexOf(':');
+            downloadButton.href =
+              '/download/zip/node/' +
+              addrs[0].slice(0, colon) +
+              '?sub=' +
+              encodeURIComponent(addrs[0].slice(colon + 1));
           } else {
             downloadButton.classList.add('is-visible');
-            downloadButton.href = '/download/zip?ids=' + ids.join(',');
+            var parts = [];
+            if (ids.length > 0) parts.push('ids=' + ids.join(','));
+            if (addrs.length > 0) {
+              parts.push(
+                'nodes=' +
+                  addrs
+                    .map(function (address) {
+                      var colon = address.indexOf(':');
+                      return (
+                        address.slice(0, colon) +
+                        ':' +
+                        encodeURIComponent(address.slice(colon + 1))
+                      );
+                    })
+                    .join(',')
+              );
+            }
+            downloadButton.href = '/download/zip?' + parts.join('&');
           }
         }
 
-        checkboxes.forEach(function (checkbox) {
-          checkbox.hidden = false;
-          checkbox.addEventListener('click', function () {
-            var id = checkbox.dataset.select;
-            selected[id] = !selected[id];
-            refresh();
+        // -- expansion and per-node pages -----------------------------------
+
+        function findFolderRow(key) {
+          var match = null;
+          Array.prototype.forEach.call(
+            list.querySelectorAll('.folder-row[data-folder-key]'),
+            function (row) {
+              if (!match && row.dataset.folderKey === key) match = row;
+            }
+          );
+          return match;
+        }
+
+        // A node's fragment address rides the row's own stamps: the
+        // root record id plus the relative sub path — no absolute
+        // filesystem path is ever addressed.
+        function ensurePageState(row) {
+          var key = row.dataset.folderKey;
+          if (!pages[key]) {
+            pages[key] = {
+              rootId: row.dataset.nodeRoot,
+              sub: row.dataset.nodeSub,
+              offset: 0,
+              hasMore: false,
+              loading: false,
+            };
+          }
+          return pages[key];
+        }
+
+        // One window of a node's page: the request itself materializes
+        // the node's direct children server-side (ADR-0005 — the
+        // listing showing the folder is the trigger), idempotent on
+        // every repeat fetch.
+        async function fetchWindow(key) {
+          var state = pages[key];
+          if (!state || state.loading) return false;
+          state.loading = true;
+          try {
+            var url =
+              '/node/' +
+              encodeURIComponent(state.rootId) +
+              '?sub=' +
+              encodeURIComponent(state.sub) +
+              '&offset=' +
+              String(state.offset);
+            var response = await fetch(url);
+            if (!response.ok) return false;
+            var text = await response.text();
+            var holder = document.createElement('div');
+            holder.innerHTML = text;
+            var template = holder.querySelector('template');
+            // The node may have been collapsed while its page was in
+            // flight — its state is gone, so the answer is dropped.
+            if (!template || !pages[key]) return false;
+            applyFragment(key, template);
+            return true;
+          } catch (error) {
+            // A dropped or failed page leaves the node untouched — its
+            // rows simply stay unfetched. The console carries it for
+            // anyone watching; the listing itself keeps working.
+            console.warn('listing: node page fetch failed:', error);
+            return false;
+          } finally {
+            var live = pages[key];
+            if (live) live.loading = false;
+          }
+        }
+
+        // Merge one fragment: the template's paging stamps advance the
+        // node's fetch cursor (never backwards), then the rows slot
+        // into place.
+        function applyFragment(key, template) {
+          var state = pages[key];
+          var row = findFolderRow(key);
+          if (!state || !row) return;
+
+          var windowRows = Number(template.dataset.windowRows) || 0;
+          var windowEnd = Number(template.dataset.offset) + windowRows;
+          state.offset = Math.max(state.offset, windowEnd);
+          state.hasMore = template.dataset.hasMore === 'true';
+          insertRows(row, template.content);
+          refresh();
+        }
+
+        // The fragment renders one derivation order — files, then
+        // lazily-known folders, then this window's failure marker — but
+        // the flat list reads in tree order. The node's own block (the
+        // rows deeper than it that follow it) holds where earlier
+        // windows and expanded child subtrees live, and the rows slot
+        // around them: files before the node's first child folder,
+        // folders before its first failure marker, the marker at the
+        // very end of the block.
+        function insertRows(row, content) {
+          var depth = Number(row.dataset.depth);
+          var children = [];
+          var boundary = row.nextSibling;
+          while (
+            boundary &&
+            boundary.nodeType === 1 &&
+            boundary.dataset.depth !== undefined &&
+            Number(boundary.dataset.depth) > depth
+          ) {
+            children.push(boundary);
+            boundary = boundary.nextSibling;
+          }
+
+          var childFolder = null;
+          var childMarker = null;
+          children.forEach(function (child) {
+            if (Number(child.dataset.depth) !== depth + 1) return;
+            if (!childFolder && child.classList.contains('folder-row')) {
+              childFolder = child;
+            }
+            if (!childMarker && child.classList.contains('materialize-marker')) {
+              childMarker = child;
+            }
           });
+
+          var folderAnchor = childMarker || boundary;
+          var fileAnchor = childFolder || folderAnchor;
+
+          // Snapshot before inserting: `content.children` is live, and
+          // every insertBefore moves its row out of the fragment —
+          // iterating the collection directly would skip from the
+          // second row on.
+          Array.prototype.slice
+            .call(content.children)
+            .forEach(function (el) {
+              if (el.classList.contains('file-row')) {
+                list.insertBefore(el, fileAnchor);
+              } else if (el.classList.contains('folder-row')) {
+                list.insertBefore(el, folderAnchor);
+              } else if (el.classList.contains('materialize-marker')) {
+                list.insertBefore(el, boundary);
+              }
+            });
+        }
+
+        // Collapsing empties the node's page plus everything under it —
+        // rows come out of the DOM and state leaves with them
+        // (issue #24): a re-expand refetches from the first offset over
+        // the server's idempotent registrations. The `/` boundary keeps
+        // pruning whole-segment exact: `Photos` cannot prune `Photos-2`.
+        function pruneUnder(row, key) {
+          var depth = Number(row.dataset.depth);
+          var el = row.nextSibling;
+          while (
+            el &&
+            el.nodeType === 1 &&
+            el.dataset.depth !== undefined &&
+            Number(el.dataset.depth) > depth
+          ) {
+            var next = el.nextSibling;
+            list.removeChild(el);
+            el = next;
+          }
+          delete pages[key];
+          var prefix = key + '/';
+          Object.keys(pages).forEach(function (pageKey) {
+            if (pageKey.indexOf(prefix) === 0) delete pages[pageKey];
+          });
+          Object.keys(expanded).forEach(function (expandedKey) {
+            if (expandedKey.indexOf(prefix) === 0) delete expanded[expandedKey];
+          });
+          refresh();
+        }
+
+        function toggleFolder(row, chevron) {
+          var key = row.dataset.folderKey;
+          var open = !expanded[key];
+          expanded[key] = open;
+
+          // The row bakes the shade it shows (ADR-0002/0004): an open
+          // folder paints the region's shade — grey at even depth,
+          // plain at odd — and a collapsed row falls back to its
+          // parent's. Nothing else re-shades: inserted rows carry the
+          // stamps their server fragment derived.
+          var depth = Number(row.dataset.depth);
+          var shade;
+          if (open) {
+            shade = depth % 2 === 0 ? 1 : 0;
+          } else if (depth === 0) {
+            shade = 0;
+          } else {
+            shade = (depth - 1) % 2 === 0 ? 1 : 0;
+          }
+          row.dataset.shade = String(shade);
+
+          chevron.setAttribute('aria-expanded', open ? 'true' : 'false');
+          chevron.setAttribute(
+            'aria-label',
+            (open ? 'Collapse ' : 'Expand ') +
+              row.querySelector('.folder-name').textContent
+          );
+          chevron.classList.toggle('is-collapsed', !open);
+
+          if (open) {
+            ensurePageState(row);
+            void fetchWindow(key);
+          } else {
+            pruneUnder(row, key);
+          }
+        }
+
+        // Fetch-ahead while scrolling (ADR-0006): near the end of the
+        // container, every expanded node with a further page pulls its
+        // next window, so the tail is seamless wherever it lands — the
+        // hold stays bounded by one page budget per expanded node, and
+        // collapsed nodes hold nothing.
+        async function fetchAhead() {
+          if (
+            list.scrollTop + list.clientHeight <
+            list.scrollHeight - FETCH_AHEAD_PX
+          ) {
+            return;
+          }
+          var keys = Object.keys(pages);
+          for (var i = 0; i < keys.length; i += 1) {
+            var state = pages[keys[i]];
+            if (state.hasMore && !state.loading) await fetchWindow(keys[i]);
+          }
+        }
+
+        // One delegated click handler covers every row the page ever
+        // shows — fragments arrive after load. A checkbox selects its
+        // row (a folder checkbox its node: checking never auto-checks
+        // members, unchecking drops the subtree's member picks and
+        // nested node selections — issue #27); only a folder row's own
+        // chevron toggles the row (the row's click is never a toggle),
+        // and a file's link downloads it with or without this script.
+        list.addEventListener('click', function (event) {
+          var target = event.target;
+          if (!(target instanceof Element)) return;
+
+          var nodeBox = target.closest('[data-node-select]');
+          if (nodeBox && list.contains(nodeBox)) {
+            var row = nodeBox.closest('.folder-row');
+            if (row) {
+              var address = nodeAddress(row);
+              if (selectedNodes[address]) {
+                dropNodeSubtree(row);
+              } else {
+                selectedNodes[address] = true;
+              }
+            }
+            refresh();
+            return;
+          }
+
+          var checkbox = target.closest('[data-select]');
+          if (checkbox && list.contains(checkbox)) {
+            var id = checkbox.dataset.select;
+            if (selected[id]) {
+              delete selected[id];
+            } else {
+              selected[id] = true;
+            }
+            refresh();
+            return;
+          }
+
+          var chevron = target.closest('[data-toggle]');
+          if (chevron && list.contains(chevron)) {
+            var folderRow = chevron.closest('.folder-row');
+            if (folderRow) toggleFolder(folderRow, chevron);
+          }
         });
 
         selectAll.hidden = false;
         selectAll.addEventListener('click', function () {
-          // "every" after this click is when every file is selected now.
-          var every = selectedIds().length === checkboxes.length;
-          checkboxes.forEach(function (checkbox) {
-            selected[checkbox.dataset.select] = !every;
+          var boxes = Array.prototype.slice.call(
+            list.querySelectorAll('[data-select]')
+          );
+          var ids = boxes.map(function (checkbox) {
+            return checkbox.dataset.select;
           });
+          // Roots are the folder rows stamped as whole records; their
+          // node selections ride exactly like the desktop group's.
+          var addresses = rootAddresses();
+          // "covered" after this click is when every rendered file row
+          // and every root's node selection is selected now — covered
+          // means the click empties the selection (node selections
+          // included, nested ones too), partially covered means the
+          // click finishes the job.
+          if (selectionCovers(ids, addresses)) {
+            ids.forEach(function (id) {
+              delete selected[id];
+            });
+            Object.keys(selectedNodes).forEach(function (address) {
+              delete selectedNodes[address];
+            });
+          } else {
+            ids.forEach(function (id) {
+              selected[id] = true;
+            });
+            addresses.forEach(function (address) {
+              selectedNodes[address] = true;
+            });
+          }
           refresh();
         });
 
-        folderButtons.forEach(function (button) {
-          button.hidden = false;
-          button.addEventListener('click', function () {
-            var every = subtreeCount(button) === subtreeIds(button).length;
-            subtreeIds(button).forEach(function (id) {
-              selected[id] = !every;
-            });
-            refresh();
-          });
+        // Expansion seeds from the server's stamps (`aria-expanded`):
+        // neither side ever re-derives the five-children budget — the
+        // stamps are the rule's derived form. Root rows' page states
+        // start ready even while collapsed, so a toggle is one fetch.
+        var expandedKeys = [];
+        Array.prototype.forEach.call(
+          list.querySelectorAll('.folder-row[data-folder-key]'),
+          function (row) {
+            var key = row.dataset.folderKey;
+            var chevron = row.querySelector('[data-toggle]');
+            if (chevron) {
+              chevron.hidden = false;
+              expanded[key] = chevron.getAttribute('aria-expanded') === 'true';
+            }
+            if (row.dataset.nodeRoot !== undefined) {
+              ensurePageState(row);
+              if (expanded[key]) expandedKeys.push(key);
+            }
+          }
+        );
+
+        // A stamped-expanded root's rows come from its own fragment —
+        // the initial page carries top-level rows only, so the auto
+        // fetch is what paints its first expansion.
+        (async function () {
+          for (var i = 0; i < expandedKeys.length; i += 1) {
+            await fetchWindow(expandedKeys[i]);
+          }
+        })();
+
+        list.addEventListener('scroll', function () {
+          void fetchAhead();
         });
 
-        chevrons.forEach(function (chevron) {
-          chevron.hidden = false;
-          chevron.addEventListener('click', function () {
-            var key = chevron.dataset.toggle;
-            expanded[key] = !expanded[key];
-            applyExpansion();
-          });
-        });
-
-        applyExpansion();
         refresh();
       })();
     </script>

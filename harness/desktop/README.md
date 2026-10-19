@@ -25,9 +25,10 @@ Fixture tree (recreated per run, `$TEMP\mosquito-harness\desktop`):
 ```text
 beach-notes.txt     loose
 release-plan.md     loose
-Photographs/        folder root → tree "Photographs" (starts expanded)
-  sunrise.jpg       member (direct)
-  travel/beach.jpg  nested member, hidden until `travel` expands
+Photographs/        folder → counted by a background import run
+  sunrise.jpg       (ADR-0007); commits a root record — it produces no
+  travel/beach.jpg  file rows on the desktop list until #24 browses
+                    lazily-known content
 ```
 
 Screenshots land in gitignored `test-results/desktop-harness/`.
@@ -52,7 +53,7 @@ tauri-pilot ipc harness_seed        # stage the fixture tree through the
 tauri-pilot snapshot -i             # refs (@e1, @e2…) — refs reset per snapshot
 tauri-pilot click @e12              # toggle the files list, select a row…
 tauri-pilot assert text .folder-name "Photographs"
-tauri-pilot assert count .file-row 4
+tauri-pilot assert count .file-row 2
 tauri-pilot screenshot /tmp/desktop-now.png
 tauri-pilot logs --level error      # console errors + unhandled rejections
 ```
@@ -77,7 +78,13 @@ the useful stable handles on the list are:
 
 The folder-tree selectors are the stable test contract for this UI
 (issue #8): scenarios target attributes, never layout or snapshot
-refs, so the DOM can change without harness breakage. The web
+refs, so the DOM can change without harness breakage. From #24 on,
+the record's group row materializes through its own expansion, so the
+sweep drives the loose-row parts of the table first, then the group
+row: #29 closes the sweep with the node pass — the `travel`
+subfolder row's own node checkbox, its covered member standing down,
+and a one-action remove_node sweep that leaves the record alive. The
+web
 harness (`harness/web/README.md`) carries the corresponding contract
 for the served listing — same tree, same wording where the selectors
 match the app's, honest differences where the two implementations
@@ -95,11 +102,22 @@ tauri-pilot run harness/desktop/scenarios/desktop-sweep.toml --screenshots-dir t
 `harness_seed` (debug builds only, `src-tauri/src/harness.rs`) creates
 the fixture files and queues their paths in the production
 `PendingShareFiles` buffer, then emits `share-files-requested` — the
-frontend drains it through the same `add_paths` flow as a real
-drop/pick, including server start. Scenario coverage: the folder tree
-(expansion defaults, chevron toggling, region shading, subtree
-selection counting folded members), selection (row + folder +
-select-all), bulk removal, and the return to the empty dropzone.
+frontend drains it through the same `import_paths` flow as a real
+drop/pick: the loose files register immediately, and `Photographs`
+starts an import run that reports per-root progress on the board
+(`[aria-label="Import progress"]`, "counting <path> — N entries",
+with `[aria-label^="Cancel import of"]` to cancel) until the root
+record commits and the server auto-starts. The run is far too quick
+to observe for a two-file fixture, so the progress board itself is
+covered by the SharePanel unit tests; the sweep covers the loose rows
+(selection, bulk removal) and the share staying up because the
+imported root record still counts as content, then the record's own
+cover. Scenario coverage: loose-file rendering and selection,
+select-all, bulk removal (with the record's group deselected first,
+per ADR-0006's node-resolved selection), the group row's expansion,
+the `travel` node checkbox with its covered member inert, and the
+one-action node removal that leaves the record and its updated live
+count in place (#29).
 
 ## Release safety
 

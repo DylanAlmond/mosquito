@@ -1,7 +1,7 @@
 # ADR-0002: The folder tree is a derived view; subfolders are not entities
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted (revised by ADR-0006)
 
 ## Context
 

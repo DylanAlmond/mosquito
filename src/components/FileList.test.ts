@@ -1,6 +1,6 @@
-import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
-import type { SharedFile } from '../types';
+import type { FailedAdd, NodePageRow, SharedFile, TopListing } from '../types';
 import { useSharer } from '../composables/useSharer';
 import { invoke } from '@tauri-apps/api/core';
 import FileList from './FileList.vue';
@@ -9,16 +9,66 @@ vi.mock('@tauri-apps/api/core');
 
 const SERVER_STOPPED = { running: false, url: null, port: null, lan_ip: null };
 
-let sharedFiles: SharedFile[] = [];
+/// The mirrored page budget (ADR-0006) — the component fetches within it.
+const PAGE_SIZE = 200;
 
-const PHOTOS = 'C:/Users/me/Photos';
-const DOCS = 'D:/Stuff/Docs';
+// -- fake backend: mirrors listing_pages.rs' derivation rules -------------
 
-function loose(id: number, name: string): SharedFile {
+interface RootFixture {
+  id: number;
+  name: string;
+  key: string;
+  file_count: number;
+}
+
+let loose: SharedFile[];
+let rootRecords: RootFixture[];
+/** Registered membership per root record, exactly what import committed. */
+let rootFiles: Record<number, SharedFile[]>;
+/** Lazily-known directories that hold no registered file of their own. */
+let emptyDirs: Record<number, Record<string, string[]>>;
+/** Node-scoped materialization failures (`${rootId}@${subPath}`). */
+let pageFailures: Record<string, FailedAdd[]>;
+
+const dirOf = (relativePath: string) => {
+  const cut = relativePath.lastIndexOf('/');
+  return cut === -1 ? '' : relativePath.slice(0, cut);
+};
+
+const byFile = (a: { name: string }, b: { name: string }) =>
+  a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+const byName = (a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase());
+
+function nodeRows(rootId: number, subPath: string): NodePageRow[] {
+  const files = (rootFiles[rootId] ?? [])
+    .filter((file) => dirOf(file.provenance!.relative_path) === subPath)
+    .sort(byFile);
+  const sub = subPath ? `${subPath}/` : '';
+  const folders = [
+    ...(rootFiles[rootId] ?? []).flatMap((file) => {
+      const rest = file.provenance!.relative_path.slice(sub.length);
+      return rest.includes('/') ? [rest.slice(0, rest.indexOf('/'))] : [];
+    }),
+    ...(emptyDirs[rootId]?.[subPath] ?? [])
+  ]
+    .filter((name, index, all) => all.indexOf(name) === index)
+    .sort(byName);
+
+  // The core's page rule: file rows name-sorted, then lazy folder rows
+  // name-sorted (listing_pages.rs).
+  return [
+    ...files.map((file) => ({ kind: 'file', file }) as NodePageRow),
+    ...folders.map((name) => ({ kind: 'lazy_folder', name }) as NodePageRow)
+  ];
+}
+
+// -- fixtures ---------------------------------------------------------------
+
+function looseFile(id: number, name: string): SharedFile {
   return { id, name, path: `C:/top/${name}`, size: 7, provenance: null };
 }
 
-function member(id: number, relativePath: string, folderRoot: string): SharedFile {
+function member(id: number, folderRoot: string, relativePath: string): SharedFile {
   return {
     id,
     name: relativePath.split('/').pop()!,
@@ -28,327 +78,670 @@ function member(id: number, relativePath: string, folderRoot: string): SharedFil
   };
 }
 
-describe('FileList', () => {
+/** One root record: display name is the folder's basename; `key` is the
+    store's disambiguation of it (`Photos`, `Photos-2`, …). */
+function record(
+  id: number,
+  folderRoot: string,
+  files: SharedFile[],
+  key = folderRoot.split('/').pop()!
+): RootFixture {
+  const name = folderRoot.split('/').pop()!;
+  return { id, name, key, file_count: files.length };
+}
+
+const PHOTOS = 'C:/Users/me/Photos';
+const DOCS = 'D:/Stuff/Docs';
+
+/** Standard three-root board: one loose file, a nesting root, a flat one. */
+function standardBoard() {
+  const photosFiles = [
+    member(21, PHOTOS, 'beach.jpg'),
+    member(22, PHOTOS, 'sunsets/shore.jpg'),
+    member(23, PHOTOS, 'sunsets/dune.jpg')
+  ];
+  loose = [looseFile(2, 'notes.txt')];
+  rootRecords = [record(10, PHOTOS, photosFiles), record(11, DOCS, [member(31, DOCS, 'a.txt')])];
+  rootFiles = { 10: photosFiles, 11: [member(31, DOCS, 'a.txt')] };
+  emptyDirs = {};
+  pageFailures = {};
+}
+
+/// 250 top-level members: the first page fills, the tail waits for
+/// fetch-ahead.
+function bigBoard() {
+  const files = Array.from({ length: 250 }, (_, index) =>
+    member(1000 + index, PHOTOS, `row-${String(index).padStart(3, '0')}.txt`)
+  );
+  loose = [];
+  rootRecords = [record(10, PHOTOS, files)];
+  rootFiles = { 10: files };
+  emptyDirs = {};
+  pageFailures = {};
+}
+
+// -- mounting helpers -------------------------------------------------------
+
+async function settle(iterations = 20) {
+  for (let i = 0; i < iterations; i += 1) await Promise.resolve();
+}
+
+const mounted = () => mount(FileList);
+
+const rowTexts = (wrapper: ReturnType<typeof mounted>) =>
+  wrapper.findAll('.file-rows > li').map((row) => {
+    const folder = row.find('.folder-name');
+    return folder.exists() ? folder.text() : row.find('.file-name').text();
+  });
+
+function folderRow(wrapper: ReturnType<typeof mounted>, name: string, which = 0) {
+  return wrapper
+    .findAll('.folder-row')
+    .filter((row) => row.find('.folder-name').text() === name)[which]!;
+}
+
+const chevronOf = (row: ReturnType<typeof folderRow>) =>
+  row!.find('[aria-label^="Expand"], [aria-label^="Collapse"]');
+
+async function expand(row: NonNullable<ReturnType<typeof folderRow>>) {
+  await chevronOf(row).trigger('click');
+  await settle();
+}
+
+const invokes = (command: string) =>
+  vi.mocked(invoke).mock.calls.filter(([c]) => c === command);
+
+describe('FileList (paged feed)', () => {
   beforeEach(async () => {
-    sharedFiles = [
-      member(1, 'vacation/beach.jpg', PHOTOS),
-      loose(2, 'notes.txt'),
-      member(3, 'a.txt', DOCS),
-      member(4, 'beach.jpg', PHOTOS)
-    ];
+    standardBoard();
 
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation((async (command: string, args?: Record<string, unknown>) => {
       switch (command) {
-        case 'list_files':
-          return sharedFiles;
+        case 'list_top':
+          return { loose, roots: rootRecords } satisfies TopListing;
         case 'get_server_info':
           return SERVER_STOPPED;
         case 'get_qr':
           return '';
+        case 'list_page': {
+          const rootId = args?.rootId as number;
+          const subPath = args?.subPath as string;
+          const offset = (args?.offset as number) ?? 0;
+          const limit = (args?.limit as number) ?? PAGE_SIZE;
+          if (!rootRecords.some((root) => root.id === rootId)) {
+            throw new Error(`unknown root ${rootId}`);
+          }
+          const rows = nodeRows(rootId, subPath);
+          const window = rows.slice(offset, offset + limit);
+          return {
+            root_id: rootId,
+            sub_path: subPath,
+            offset,
+            rows: window,
+            failures: pageFailures[`${rootId}@${subPath}`] ?? [],
+            total: rows.length,
+            has_more: offset + window.length < rows.length
+          };
+        }
         case 'remove_file': {
-          const removed = sharedFiles.find((f) => f.id === args?.id);
-          sharedFiles = sharedFiles.filter((f) => f.id !== args?.id);
+          const id = args?.id as number;
+          const inLoose = loose.find((file) => file.id === id);
+          loose = loose.filter((file) => file.id !== id);
+          if (inLoose) return inLoose;
+          let removed: SharedFile | undefined;
+          for (const [rootId, files] of Object.entries(rootFiles)) {
+            const hit = files.find((file) => file.id === id);
+            if (hit) {
+              removed = hit;
+              rootFiles[Number(rootId)] = files.filter((file) => file.id !== id);
+            }
+          }
+          if (!removed) throw new Error(`unknown file ${id}`);
           return removed;
         }
-        case 'start_server':
-        case 'stop_server':
-          return null;
+        case 'remove_root': {
+          const rootId = args?.rootId as number;
+          const record = rootRecords.find((root) => root.id === rootId);
+          if (!record) throw new Error(`unknown root ${rootId}`);
+          const removedFiles = rootFiles[rootId] ?? [];
+          rootRecords = rootRecords.filter((root) => root.id !== rootId);
+          const { [rootId]: _dropped, ...rest } = rootFiles;
+          rootFiles = rest;
+          return { record: { ...record }, files: removedFiles };
+        }
+        case 'remove_node': {
+          const rootId = args?.rootId as number;
+          const subPath = args?.subPath as string;
+          if (!rootRecords.some((root) => root.id === rootId)) {
+            throw new Error(`unknown root ${rootId}`);
+          }
+          const prefix = subPath ? `${subPath}/` : '';
+          const sweep = (rootFiles[rootId] ?? []).filter((file) =>
+            file.provenance!.relative_path.startsWith(prefix)
+          );
+          rootFiles[rootId] = (rootFiles[rootId] ?? []).filter(
+            (file) => !file.provenance!.relative_path.startsWith(prefix)
+          );
+          for (const record of rootRecords) {
+            if (record.id === rootId) {
+              record.file_count -= sweep.length;
+            }
+          }
+          return { files: sweep };
+        }
         default:
           throw new Error(`unexpected command ${command}`);
       }
     }) as unknown as typeof invoke);
 
-    // The composable's refs are module-level singletons; drain them between tests.
-    sharedFiles = [];
-    await useSharer().init();
-    useSharer().files.value = [];
-    sharedFiles = [
-      member(1, 'vacation/beach.jpg', PHOTOS),
-      loose(2, 'notes.txt'),
-      member(3, 'a.txt', DOCS),
-      member(4, 'beach.jpg', PHOTOS)
-    ];
+    // The composable's refs are module-level singletons; drain them
+    // between tests, then re-read the freshly seeded board.
+    const sharer = useSharer();
+    sharer.loose.value = [];
+    sharer.roots.value = [];
+    sharer.failedAdds.value = [];
+    sharer.error.value = null;
+    sharer.busy.value = false;
+    sharer.contentVersion.value = 0;
+    sharer.info.value = SERVER_STOPPED;
+    await sharer.init();
   });
 
-  function mountList() {
-    useSharer().files.value = sharedFiles;
-    return mount(FileList);
-  }
+  it('renders loose files then one collapsed lazily-known row per root record, fetching nothing', () => {
+    const wrapper = mounted();
 
-  function rowTexts(wrapper: ReturnType<typeof mountList>): string[] {
-    return wrapper.findAll('.file-rows > li').map((row) => {
-      const name = row.find('.file-name');
-      return (name.exists() ? name : row.find('.folder-name')).text();
-    });
-  }
-
-  function folderRow(wrapper: ReturnType<typeof mountList>, name: string) {
-    return wrapper
-      .findAll('.folder-row')
-      .find((row) => row.find('.folder-name').text() === name)!;
-  }
-
-  it('renders loose files, then each folder root expanded with its direct files before its collapsed subfolders', () => {
-    const wrapper = mountList();
-
-    // Subfolder contents (vacation/beach.jpg) are not rendered collapsed.
     expect(rowTexts(wrapper)).toEqual([
       'notes.txt',
       'Photos',
-      'beach.jpg',
-      'vacation',
-      'Docs',
-      'a.txt'
+      'Docs'
     ]);
+    expect(invokes('list_page')).toHaveLength(0);
 
-    // Roots start expanded, subfolders start collapsed.
-    expect(folderRow(wrapper, 'Photos')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
-      'true'
-    );
-    expect(folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
-      'false'
-    );
-    expect(rowTexts(wrapper)).not.toContain('vacation/beach.jpg');
-  });
-
-  it('toggles a subfolder through its chevron only — not by clicking the row or its name', async () => {
-    const wrapper = mountList();
-
-    // Row and name clicks must never change expansion (chevron-only).
-    await folderRow(wrapper, 'vacation')!.trigger('click');
-    await folderRow(wrapper, 'vacation')!.find('.folder-name').trigger('click');
-    expect(rowTexts(wrapper)).not.toContain('vacation/beach.jpg');
-
-    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
-    expect(rowTexts(wrapper)).toEqual([
-      'notes.txt',
-      'Photos',
-      'beach.jpg',
-      'vacation',
-      'beach.jpg',
-      'Docs',
-      'a.txt'
-    ]);
-    expect(folderRow(wrapper, 'vacation')!.attributes('aria-expanded')).toBeUndefined();
-    expect(
-      folderRow(wrapper, 'vacation')!.find('[aria-label="Collapse vacation"]').attributes(
-        'aria-expanded'
-      )
-    ).toBe('true');
-  });
-
-  it('checks a folder checkbox when only some descendants are selected — hidden members included', async () => {
-    const wrapper = mountList();
-
-    const photosRow = folderRow(wrapper, 'Photos')!;
-    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
-    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
-    // Selecting twice sets everything, then deselects everything again:
-    // subtree counts both the visible beach.jpg and the one folded away
-    // inside the collapsed `vacation` subfolder.
-    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('false');
-
-    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
-    // ... full subtree now selected (aria-checked true).
-    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('true');
-
-    // The visible member drops out; the hidden member still keeps
-    // Photos part-selected, which is only visible as a "mixed" checkbox.
-    const visibleBeach = wrapper
-      .findAll('.file-row')
-      .find((row) => row.text() === 'beach.jpg')!;
-    await visibleBeach.trigger('click');
-    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('mixed');
-  });
-
-  it('a subfolder row acts on its own subtree only', async () => {
-    const wrapper = mountList();
-
-    // Expand `vacation`, then act on the subfolder itself.
-    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
-
-    const vacationRow = folderRow(wrapper, 'vacation')!;
-    await vacationRow
-      .find('[aria-label="Select or deselect all files in vacation"]')
-      .trigger('click');
-
-    const selected = wrapper.findAll('.file-row.is-selected').map((row) => row.text());
-    // Exactly one row is highlighted: the member inside `vacation`.
-    // Note `Photos` shows the same basename for its other member; only
-    // one of them is selected.
-    expect(selected).toHaveLength(1);
-
-    // The parent folder reflects a partial select: one of its two members.
-    expect(
-      folderRow(wrapper, 'Photos')!.find('[aria-checked]').attributes('aria-checked')
-    ).toBe('mixed');
-  });
-
-  it('starts a top-level folder with more than five children collapsed', async () => {
-    sharedFiles = [
-      member(1, 'one.txt', PHOTOS),
-      member(2, 'two.txt', PHOTOS),
-      member(3, 'three.txt', PHOTOS),
-      member(4, 'four.txt', PHOTOS),
-      member(5, 'five.txt', PHOTOS),
-      member(6, 'sub/folded.txt', PHOTOS)
-    ];
-    useSharer().files.value = sharedFiles;
-
-    const wrapper = mount(FileList);
-
-    // Six direct children — the root waits for the chevron, and its
-    // subtree ids stay complete for the checkbox (mirrors listing.rs).
     const photos = folderRow(wrapper, 'Photos')!;
-    expect(photos.find('[aria-expanded]').attributes('aria-expanded')).toBe('false');
-    expect(rowTexts(wrapper)).toEqual(['Photos']);
-
-    await photos.find('[aria-label="Expand Photos"]').trigger('click');
-    expect(photos.find('[aria-expanded]').attributes('aria-expanded')).toBe('true');
-    expect(rowTexts(wrapper)).toEqual([
-      'Photos',
-      'one.txt',
-      'two.txt',
-      'three.txt',
-      'four.txt',
-      'five.txt',
-      'sub'
-    ]);
+    expect(chevronOf(photos).attributes('aria-expanded')).toBe('false');
+    // The root row shows its counted total — display only; showing it
+    // materializes nothing.
+    expect(photos.text()).toContain('3 files');
   });
 
-  it('stamps tree rows with their depth tokens and keeps loose files flush (ADR-0004)', async () => {
-    const wrapper = mountList();
+  it('expanding a root fetches its first page and lists materialized files and lazy subfolders', async () => {
+    const wrapper = mounted();
 
-    const findRow = (text: string, selector: string) =>
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('list_page', {
+      rootId: 10,
+      subPath: '',
+      offset: 0,
+      limit: PAGE_SIZE
+    });
+    // The page windows: the registered direct file first, then the
+    // lazily-known `sunsets` subfolder (no eager enumeration of it).
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'sunsets', 'Docs']);
+  });
+
+  it('lazy-folder rows expand too — their page fetches with the sub path and carries its node checkbox', async () => {
+    const wrapper = mounted();
+
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('list_page', {
+      rootId: 10,
+      subPath: 'sunsets',
+      offset: 0,
+      limit: PAGE_SIZE
+    });
+    expect(rowTexts(wrapper)).toEqual([
+      'notes.txt',
+      'Photos',
+      'beach.jpg',
+      'sunsets',
+      'dune.jpg',
+      'shore.jpg',
+      'Docs'
+    ]);
+
+    // Lazily-known content is expandable and select-through-the-node
+    // (issue #29): its row carries its own node checkbox — unchecked
+    // until its node is picked — and no per-row delete.
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    expect(sunsets.find('[role="checkbox"]').exists()).toBe(true);
+    expect(
+      sunsets
+        .find('[aria-label^="Select or deselect all files in sunsets"]')
+        .attributes('aria-checked')
+    ).toBe('false');
+    expect(sunsets.text()).not.toContain('files');
+  });
+
+  it('stamps paged rows with depth tokens and keeps loose files flush', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const depthOf = (name: string, selector: string) =>
       wrapper
         .findAll('.file-rows > li')
-        .find((row: any) => {
-          const match = row.find(selector);
-          return match.exists() && match.text() === text;
-        })!;
+        .find((row) => row.find(selector).exists() && row.find(selector).text() === name)!;
 
-    // Loose files carry no depth attributes: they stay flush.
-    const loose = findRow('notes.txt', '.file-name');
-    expect(loose.attributes('style')).toBeUndefined();
-    expect(loose.attributes('data-depth')).toBeUndefined();
+    // Loose files stay flush.
+    const notes = depthOf('notes.txt', '.file-name');
+    expect(notes.attributes('style')).toBeUndefined();
+    expect(notes.attributes('data-depth')).toBeUndefined();
 
-    // Folder roots indent at their own depth; the chevron token rides
-    // the same row.
-    const photos = findRow('Photos', '.folder-name');
-    expect(photos.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:0;');
-    expect(photos.attributes('data-depth')).toBe('0');
-
-    // Members one level under the folder storing them; the extra
-    // chevron-slot catch-up lives in the stylesheet, not the token.
-    const member = findRow('beach.jpg', '.file-name');
-    expect(member.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:1;');
-    expect(member.attributes('data-depth')).toBe('1');
-    // Subfolder rows carry their own depth.
-    const vacation = findRow('vacation', '.folder-name');
-    expect(vacation.attributes('style')!.replace(/\s+/g, '')).toBe('--depth:1;');
-    expect(vacation.attributes('data-depth')).toBe('1');
-
-    // Expanding the subfolder reveals its member at depth 2 (the first
-    // `beach.jpg` stays Photos' depth-1 member).
-    await vacation.find('[aria-label="Expand vacation"]').trigger('click');
-    expect(
-      wrapper
-        .findAll('.file-row')
-        .some(
-          (row: any) =>
-            row.find('.file-name').text() === 'beach.jpg' &&
-            row.attributes('style')!.replace(/\s+/g, '') === '--depth:2;' &&
-            row.attributes('data-depth') === '2'
-        )
-    ).toBe(true);
+    expect(depthOf('Photos', '.folder-name').attributes('data-depth')).toBe('0');
+    expect(depthOf('beach.jpg', '.file-name').attributes('data-depth')).toBe('1');
+    expect(depthOf('sunsets', '.folder-name').attributes('data-depth')).toBe('1');
+    expect(depthOf('dune.jpg', '.file-name').attributes('data-depth')).toBe('2');
   });
 
-  it('keeps collapse state when the store re-reads files after an action', async () => {
-    const wrapper = mountList();
+  it('materialization failures of a node surface as an inline marker, selectable-free', async () => {
+    pageFailures = { '10@sunsets': [{ path: `${PHOTOS}/sunsets/locked`, error: 'denied' }] };
+    await useSharer().init(); // fixture changed on the store, re-read
 
-    await folderRow(wrapper, 'vacation')!.find('[aria-label="Expand vacation"]').trigger('click');
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
 
-    // The next re-read lands the same members again (any action
-    // triggers one; assigning is what every action ends with).
-    useSharer().files.value = [...sharedFiles];
-
-    // The expanded subfolder survives the re-read…
-    expect(
-      folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')
-    ).toBe('true');
-
-    // …and so does the collapsed one.
-    await folderRow(wrapper, 'vacation')!.find('[aria-label="Collapse vacation"]').trigger('click');
-    useSharer().files.value = [...sharedFiles];
-    expect(
-      folderRow(wrapper, 'vacation')!.find('[aria-expanded]').attributes('aria-expanded')
-    ).toBe('false');
+    const marker = wrapper.find('.materialize-marker');
+    expect(marker.exists()).toBe(true);
+    expect(marker.text()).toContain(`1 item`);
+    expect(marker.text()).toContain(`couldn't be read`);
+    expect(marker.attributes('aria-label')).toContain("couldn't be read");
   });
 
-  it('keeps root overrides when the store re-reads files after an action', async () => {
-    sharedFiles = [
-      member(1, 'one.txt', PHOTOS),
-      member(2, 'two.txt', PHOTOS),
-      member(3, 'three.txt', PHOTOS),
-      member(4, 'four.txt', PHOTOS),
-      member(5, 'five.txt', PHOTOS),
-      member(6, 'sub/folded.txt', PHOTOS),
-      member(7, 'a.txt', DOCS)
-    ];
-    useSharer().files.value = sharedFiles;
-    const wrapper = mount(FileList);
+  it('fetch-ahead appends the next window of an expanded node near the end', async () => {
+    bigBoard();
+    await useSharer().init();
+    const wrapper = mounted();
 
-    // Over the budget, so the root starts collapsed; expanding it is an
-    // explicit override.
-    const photos = folderRow(wrapper, 'Photos')!;
-    await photos.find('[aria-label="Expand Photos"]').trigger('click');
+    await expand(folderRow(wrapper, 'Photos')!);
+    expect(wrapper.findAll('.file-row')).toHaveLength(PAGE_SIZE);
+    expect(invokes('list_page')).toHaveLength(1);
 
-    // The next re-read lands the same members again (any action
-    // triggers one; assigning is what every action ends with).
-    useSharer().files.value = [...sharedFiles];
+    await wrapper.find('.file-rows').trigger('scroll');
+    await settle();
 
-    // The user-opened big root survives the re-read…
-    expect(folderRow(wrapper, 'Photos')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('list_page', {
+      rootId: 10,
+      subPath: '',
+      offset: PAGE_SIZE,
+      limit: PAGE_SIZE
+    });
+    // The tail window appended: 250 members, no duplicates.
+    const fileRows = wrapper.findAll('.file-row');
+    expect(fileRows).toHaveLength(250);
+    expect(new Set(fileRows.map((row) => row.find('.file-name').text())).size).toBe(250);
+  });
+
+  it('re-reads after actions refetch covered windows — rows merge at their offset, never duplicating', async () => {
+    bigBoard();
+    await useSharer().init();
+    const wrapper = mounted();
+
+    await expand(folderRow(wrapper, 'Photos')!);
+    await wrapper.find('.file-rows').trigger('scroll'); // second window in
+    expect(wrapper.findAll('.file-row')).toHaveLength(250);
+
+    // Any action ends in a re-read (remove_file here); the covered
+    // windows refetch and merge at their offsets.
+    await wrapper.findAll('.file-row')[0].find('[aria-label^="Delete"]').trigger('click');
+    await settle();
+
+    const names = wrapper.findAll('.file-row').map((row) => row.find('.file-name').text());
+    expect(names).toHaveLength(249);
+    expect(new Set(names).size).toBe(249);
+  });
+
+  it('expansion and selection survive re-reads; a collapsed node refetches only on re-expand', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    // Pick the one materialized member; the group checkbox goes mixed.
+    const beach = wrapper.findAll('.file-row').find((row) => row.text() === 'beach.jpg')!;
+    await beach.find('[role="checkbox"]').trigger('click');
+    expect(folderRow(wrapper, 'Photos')!.find('[aria-checked]').attributes('aria-checked')).toBe(
+      'mixed'
+    );
+
+    await useSharer().init(); // the next action's re-read
+    await settle();
+
+    // Expansion and selection both survive…
+    expect(chevronOf(folderRow(wrapper, 'Photos')!).attributes('aria-expanded')).toBe('true');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(1);
+
+    // …and collapsing prunes the node's pages: no further window fetches
+    // on the next re-read, and nothing under it renders.
+    await expand(folderRow(wrapper, 'Photos')!); // collapse
+    const pagesCalls = invokes('list_page').length;
+    await useSharer().init();
+    await settle();
+    expect(invokes('list_page')).toHaveLength(pagesCalls);
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Docs']);
+
+    // Re-expanding is the trigger that materializes again.
+    await expand(folderRow(wrapper, 'Photos')!);
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'sunsets', 'Docs']);
+  });
+
+  it('checking a root group selects the whole lazily-known record; delete removes it via remove_root in one action', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    await folderRow(wrapper, 'Photos')!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    // The record plus every materialized member — one remove_root, and
+    // no per-file removals for its members (removing a folder and then
+    // downloading covers hidden content on the receiver side).
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_root', { rootId: 10 });
+    expect(invokes('remove_root')).toHaveLength(1);
+    expect(
+      invokes('remove_file').some((call) => (call[1] as { id: number }).id === 21)
+    ).toBe(false);
+
+    const sharer = useSharer();
+    expect(sharer.roots.value.map((root) => root.name)).toEqual(['Docs']);
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Docs']);
+  });
+
+  it('a selected member shows the lazy group mixed; unchecking the group drops member picks', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    const photosRow = folderRow(wrapper, 'Photos')!;
+    const beach = wrapper.findAll('.file-row').find((row) => row.text() === 'beach.jpg')!;
+    await beach.find('[role="checkbox"]').trigger('click');
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('mixed');
+
+    // Check the group: everything materialized under it resolves through
+    // the node, then the group owns the selection.
+    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('true');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(1);
+
+    // Unchecking drops the members' individual picks too.
+    await photosRow.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    expect(photosRow.find('[aria-checked]').attributes('aria-checked')).toBe('false');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+  });
+
+  it('a checked group ticks its rendered members at every depth; covered members are inert', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    await folderRow(wrapper, 'Photos')!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+
+    // Every rendered member row under the group carries its tick…
+    const memberRows = wrapper.findAll('.file-row.is-selected');
+    expect(memberRows.map((row) => row.find('.file-name').text())).toEqual([
+      'beach.jpg',
+      'dune.jpg',
+      'shore.jpg'
+    ]);
+    // …and each member's checkbox stands down: the group owns the
+    // subtree until it is unchecked (selection resolves through the
+    // node — flipping one member off isn't representable).
+    memberRows.forEach((row) => {
+      const checkbox = row.find('[role="checkbox"]');
+      expect(checkbox.attributes('aria-checked')).toBe('true');
+      expect(checkbox.attributes('disabled')).toBeDefined();
+    });
+
+    // A click on a covered member — through the row or the checkbox —
+    // changes nothing.
+    await memberRows[0]!.trigger('click');
+    await memberRows[1]!.find('[role="checkbox"]').trigger('click');
+    expect(folderRow(wrapper, 'Photos')!.find('[aria-checked]').attributes('aria-checked')).toBe(
       'true'
     );
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(3);
 
-    // …and so does a user-collapsed one on a small root (Docs fixture).
-    await folderRow(wrapper, 'Docs')!.find('[aria-label="Collapse Docs"]').trigger('click');
-    useSharer().files.value = [...sharedFiles];
+    // Unchecking the group releases the members: ticks gone, and their
+    // checkboxes wake back up (nothing else was covered).
+    await folderRow(wrapper, 'Photos')!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+    expect(wrapper.findAll('.file-row [role="checkbox"][disabled]')).toHaveLength(0);
+  });
+
+  it('delete selected splits mixed selections: groups through remove_root, stray loose ids through remove_file', async () => {
+    const wrapper = mounted();
+
+    // Whole Docs group plus the stray loose file, one action.
+    await folderRow(wrapper, 'Docs')!
+      .find('[aria-label="Select or deselect all files in Docs"]')
+      .trigger('click');
+    await wrapper.findAll('.file-row')[0].trigger('click'); // notes.txt
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_root', { rootId: 11 });
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_file', { id: 2 });
+    expect(rowTexts(wrapper)).toEqual(['Photos']);
+  });
+
+  it('select-all covers what the list can see: rendered ids and whole lazy groups', async () => {
+    const wrapper = mounted();
+
+    await wrapper.find('[aria-label="Select all shared files"]').trigger('click');
+    // Collapsed lazily-known records go as whole groups; nothing was
+    // materialized into view, so selection materializes nothing.
+    expect(invokes('list_page')).toHaveLength(0);
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    expect(invokes('remove_root')).toHaveLength(2); // both records
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_file', { id: 2 });
+    expect(rowTexts(wrapper)).toEqual([]);
+  });
+
+  it('same-named root records keep distinct keys, so selection acts on one group only', async () => {
+    const second = [member(41, 'E:/elsewhere/Photos', 'cliff.jpg')];
+    rootRecords = [
+      record(10, PHOTOS, rootFiles[10]),
+      record(12, 'E:/elsewhere/Photos', second, 'Photos-2'),
+      record(11, DOCS, rootFiles[11])
+    ];
+    rootFiles = { ...rootFiles, 12: second };
+    await useSharer().init();
+    const wrapper = mounted();
+
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Photos', 'Docs']);
+
+    // Expand the second-by-key record: the page fetch targets its id.
+    await expand(folderRow(wrapper, 'Photos', 1)!);
+    const pageCalls = invokes('list_page');
+    const page = pageCalls[pageCalls.length - 1]![1] as { rootId: number };
+    expect(page.rootId).toBe(12);
+
+    // Select the second group and delete it: the first record untouched.
+    await folderRow(wrapper, 'Photos', 1)!
+      .find('[aria-label="Select or deselect all files in Photos"]')
+      .trigger('click');
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    const removedRoots = invokes('remove_root').map((call) => (call[1] as { rootId: number }).rootId);
+    expect(removedRoots).toEqual([12]);
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Docs']);
+  });
+
+  it('a subfolder row carries its own node checkbox; selecting it routes delete through remove_node alone', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    const sunsetsBox = sunsets.find('[aria-label^="Select or deselect all files in sunsets"]');
+
+    // The record reads mixed while a nested node participates on its own.
+    await sunsetsBox.trigger('click');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('true');
+    expect(photos.find('[aria-checked]').attributes('aria-checked')).toBe('mixed');
+
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_node', { rootId: 10, subPath: 'sunsets' });
+    expect(invokes('remove_root')).toHaveLength(0);
+    // The subtree's materialized members ride the node's own removal —
+    // never their individual remove_file calls.
+    expect(invokes('remove_file')).toHaveLength(0);
+  });
+
+  it('checking a subfolder covers its rendered members inertly, and unchecking releases them', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    // Every rendered member under the node carries its tick, inert.
+    const covered = wrapper.findAll('.file-row.is-selected');
+    expect(covered.map((row) => row.find('.file-name').text())).toEqual(['dune.jpg', 'shore.jpg']);
+    covered.forEach((row) => {
+      const checkbox = row.find('[role="checkbox"]');
+      expect(checkbox.attributes('aria-checked')).toBe('true');
+      expect(checkbox.attributes('disabled')).toBeDefined();
+    });
+
+    // A click on a covered member changes nothing (the node owns it).
+    await covered[0]!.trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(2);
+
+    // Unchecking releases the subtree.
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+    expect(wrapper.findAll('.file-row.is-selected')).toHaveLength(0);
+    expect(wrapper.findAll('.file-row [role="checkbox"][disabled]')).toHaveLength(0);
+  });
+
+  it('a checked root group covers the rendered subfolder row, which stands down until unchecked', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+
+    // The root's tick reaches the subfolder row too — inert there, like
+    // every covered member, until the group is unchecked.
+    const sunsetsBox = sunsets.find('[aria-label^="Select or deselect all files in sunsets"]');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('true');
+    expect(sunsetsBox.attributes('disabled')).toBeDefined();
+
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+    expect(sunsetsBox.attributes('aria-checked')).toBe('false');
+    expect(sunsetsBox.attributes('disabled')).toBeUndefined();
+  });
+
+  it('a node picked beneath its own checked root sweeps with the record: no double removal', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+
+    const photos = folderRow(wrapper, 'Photos')!;
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    // The node pick first, then the record's own checkbox over it.
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+    await photos.find('[aria-label="Select or deselect all files in Photos"]').trigger('click');
+
+    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
+    await settle();
+
+    // The record's sweep takes the whole tree — the follow-up remove_node
+    // would answer not-found for the already-gone record.
+    expect(invokes('remove_root')).toHaveLength(1);
+    expect(invokes('remove_node')).toHaveLength(0);
+    expect(invokes('remove_file')).toHaveLength(0);
+  });
+
+  it('unchecking a node stands its nested node picks down with it', async () => {
+    // A deeper member makes `sunsets` derive its own lazy `night` row.
+    standardBoard();
+    const moon = member(24, PHOTOS, 'sunsets/night/moon.jpg');
+    rootFiles[10] = [...(rootFiles[10] ?? []), moon];
+
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+    await expand(folderRow(wrapper, 'night')!);
+
+    // The nested pick first, then the covering parent over it.
+    const night = folderRow(wrapper, 'night')!;
+    await night.find('[aria-label^="Select or deselect all files in night"]').trigger('click');
+    const sunsets = folderRow(wrapper, 'sunsets')!;
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    await sunsets.find('[aria-label^="Select or deselect all files in sunsets"]').trigger('click');
+
+    // The parent's uncheck drops the nested selection too — at address
+    // level, matching the receiver page's uncheck rule.
+    const nightBox = night.find('[aria-label^="Select or deselect all files in night"]');
+    expect(nightBox.attributes('aria-checked')).toBe('false');
+    expect(nightBox.attributes('disabled')).toBeUndefined();
+  });
+
+  it('per-row delete removes exactly that materialized member', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+
+    const beach = wrapper.findAll('.file-row').find((row) => row.text() === 'beach.jpg')!;
+    await beach.find('[aria-label="Delete beach.jpg"]').trigger('click');
+    await settle();
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('remove_file', { id: 21 });
+    expect(invokes('remove_root')).toHaveLength(0);
+    // The parent remains; the dropped member stops rendering.
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'sunsets', 'Docs']);
+  });
+
+  it('a node whose content emptied out shows no stale rows on the next re-read', async () => {
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Docs')!);
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Docs', 'a.txt']);
+
+    // The record's last member goes; the record itself stays.
+    await wrapper
+      .findAll('.file-row')
+      .find((row) => row.text() === 'a.txt')!
+      .find('[aria-label^="Delete"]')
+      .trigger('click');
+    await settle();
+
+    // The refetch covered no rows at all — the node must not keep its
+    // old materialized rows as zombies.
+    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'Docs']);
     expect(folderRow(wrapper, 'Docs')!.find('[aria-expanded]').attributes('aria-expanded')).toBe(
-      'false'
+      'true'
     );
   });
 
-  it('delete selected removes loose file and every folder member it was grouped with', async () => {
-    const wrapper = mountList();
+  it('resolved materialization failures lose their inline marker on the next re-read', async () => {
+    pageFailures = { '10@sunsets': [{ path: `${PHOTOS}/sunsets/locked`, error: 'denied' }] };
+    await useSharer().init();
+    const wrapper = mounted();
+    await expand(folderRow(wrapper, 'Photos')!);
+    await expand(folderRow(wrapper, 'sunsets')!);
+    expect(wrapper.find('.materialize-marker').exists()).toBe(true);
 
-    const docsRow = folderRow(wrapper, 'Docs')!;
-    await docsRow.find('[aria-label="Select or deselect all files in Docs"]').trigger('click');
-
-    const looseRow = wrapper.findAll('.file-row').find((row) => row.text() === 'notes.txt')!;
-    await looseRow.trigger('click');
-
-    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
-
-    const removedIds = vi.mocked(invoke).mock.calls
-      .filter(([command]) => command === 'remove_file')
-      .map(([, args]) => (args as { id: number }).id);
-
-    expect(removedIds.sort()).toEqual([2, 3]);
-  });
-
-  it('removing a folder\u2019s last member removes its folder row too', async () => {
-    const wrapper = mountList();
-
-    const docsRow = folderRow(wrapper, 'Docs')!;
-    await docsRow.find('[aria-label="Select or deselect all files in Docs"]').trigger('click');
-    await wrapper.find('[aria-label="Delete selected files"]').trigger('click');
-    await wrapper.vm.$nextTick();
-    await wrapper.vm.$nextTick();
-
-    expect(folderRow(wrapper, 'Docs')).toBeUndefined();
-    expect(rowTexts(wrapper)).toEqual(['notes.txt', 'Photos', 'beach.jpg', 'vacation']);
+    // The folder reads fine now; the next re-read refetches the window
+    // and the marker goes.
+    pageFailures = {};
+    await useSharer().init();
+    await settle();
+    expect(wrapper.find('.materialize-marker').exists()).toBe(false);
   });
 });

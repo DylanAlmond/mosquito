@@ -32,5 +32,8 @@ attributes on either side. Row heights unify on the folder row's 38px strip
 with the desktop list's 48px touch strip consciously traded for density.
 Top-level folders with more than five direct children start collapsed
 (mirrored budget), and the enhancement script needs no changes since the
-tokens ride the server-rendered rows.
+tokens ride the server-rendered rows. Revised by ADR-0006 as realized for
+issue #24: the budget rule lives on the server-rendered receiver page, while
+desktop root rows start collapsed at any size — expansion there is the
+materialization trigger (ADR-0005).
 

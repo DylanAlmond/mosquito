@@ -4,7 +4,7 @@ import { onMounted, onUnmounted, ref } from 'vue';
 /// Tauri's native drag-drop, not HTML5 drag events. With `dragDropEnabled`
 /// (the default), the webview intercepts OS file drops before the browser
 /// event model ever sees them — and hands us real filesystem paths,
-/// which is exactly what our add_files command needs.
+/// which is exactly what our import_paths command needs.
 export function useDragDrop(onDrop: (paths: string[]) => void) {
   const dragging = ref(false);
   let unlisten: (() => void) | undefined;

@@ -1,7 +1,7 @@
 # ADR-0001: Folders are derived snapshots, not entities
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted (revised by ADR-0005)
 
 ## Context
 

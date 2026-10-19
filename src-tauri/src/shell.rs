@@ -72,7 +72,10 @@ pub mod registration {
 
         #[test]
         fn legacy_verb_key_path_pins_the_star_class_key_being_removed() {
-            assert_eq!(LEGACY_VERB_KEY_PATH, r"Software\Classes\*\shell\Mosquito.Share");
+            assert_eq!(
+                LEGACY_VERB_KEY_PATH,
+                r"Software\Classes\*\shell\Mosquito.Share"
+            );
         }
 
         #[test]

@@ -1,212 +1,522 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import ChevronIcon from '../assets/chevron-compact-up.svg';
 import CheckedIcon from '../assets/square-rounded-check.svg';
 import UncheckedIcon from '../assets/square-rounded.svg';
 import TrashIcon from '../assets/trash-x.svg';
 import { useSharer } from '../composables/useSharer';
-import { buildFolderTree, type FolderNode } from '../lib/folderTree';
-import type { SharedFile } from '../types';
+import type { FailedAdd, NodeAddress, NodePageRow, RootRow, SharedFile } from '../types';
 
-const { files, busy, remove, removeMany } = useSharer();
+const { loose, roots, busy, remove, removeSelection, contentVersion, error: shareError } =
+  useSharer();
 
+/// How many rows one node's page holds — the listing's page budget
+/// (ADR-0006). Mirrors `LISTING_PAGE_ROWS` in
+/// `crates/mosquito-core/src/listing_pages.rs`; move both together.
+const PAGE_SIZE = 200;
+
+/// How close to the scroll container's end a fetch-ahead begins.
+const FETCH_AHEAD_PX = 120;
+
+/// A page window as the backend returns it.
+type PageWindow = {
+  offset: number;
+  rows: NodePageRow[];
+  failures: FailedAdd[];
+  has_more: boolean;
+};
+
+/// Selection — registered file ids and node addresses (issue #29): the
+/// root checkbox selects the group, whose removal takes the record plus
+/// every materialized member in one action; a subfolder's node checkbox
+/// selects that node the same way. Node picks ride on the record id +
+/// sub path — never member file ids, never checking-as-materializing.
 const selectedIds = ref<number[]>([]);
 
-/// The folder tree is derived at render time (ADR-0002); the store stays
-/// flat. Members keep their position in the shared list, so roots and
-/// subfolders appear in first-appearance order.
-const tree = computed(() => buildFolderTree(files.value));
+/// Node selections by their stable identity: record ids are never
+/// reused (even after removal), so the address key survives
+/// first-appearance re-keying that display names go through.
+const selectedNodes = ref(new Map<string, NodeAddress>());
 
-/// Expansion is UI-held state keyed by folder root + subfolder path
-/// (ADR-0002): it survives re-reads after every action and resets when
-/// the app restarts — it is never persisted. Subfolders default
-/// collapsed and a checked key means "away from the default" (checked
-/// = open, one step past it). Roots default expanded too — a top-level
-/// folder with more than MAX_EXPANDED_CHILDREN direct children starts
-/// collapsed (mirrors listing.rs) — and a root override records the
-/// user's explicit open/closed choice, which beats the size default.
+function nodeSelKey(rootId: number, subPath: string) {
+  return `${rootId}\u0000${subPath}`;
+}
+
+/// Expansion is UI-held state keyed by the root's disambiguated key +
+/// subfolder path (ADR-0002's rule kept): survives re-reads, resets
+/// when the app restarts, never persisted. Lazily-known content starts
+/// all collapsed — expanding is the act that materializes.
+const expandedRoots = ref(new Map<string, boolean>());
 const expandedSubfolders = ref(new Set<string>());
-const rootOverrides = ref(new Map<string, boolean>());
-
-/// How many direct children (files + subfolders) a top-level folder may
-/// hold and still start expanded — bigger roots wait for the chevron.
-/// The desktop budget mirrors `MAX_EXPANDED_CHILDREN` in listing.rs;
-/// move both together, with the pins in both test suites.
-const MAX_EXPANDED_CHILDREN = 5;
-
-/// Direct children decide a root's default: files plus subfolders, not
-/// the whole subtree — subfolders are collapsed rows anyway. A root
-/// that later drops to five children or fewer opens again on the next
-/// render unless the user picked a state meanwhile.
-function rootDefaultOpen(node: FolderNode) {
-  const directChildren = node.files.length + node.children.length;
-  return directChildren <= MAX_EXPANDED_CHILDREN;
-}
-
-function rootKey(node: FolderNode) {
-  return node.folderRoot;
-}
-
-function subKey(node: FolderNode) {
-  return `${node.folderRoot}\u0000${node.subPath}`;
-}
-
-function isExpanded(node: FolderNode) {
-  if (node.subPath === '') {
-    const override = rootOverrides.value.get(rootKey(node));
-    return override ?? rootDefaultOpen(node);
-  }
-  return expandedSubfolders.value.has(subKey(node));
-}
-
-function toggleFolder(node: FolderNode) {
-  if (node.subPath === '') {
-    const next = new Map(rootOverrides.value);
-    next.set(rootKey(node), !isExpanded(node));
-    rootOverrides.value = next;
-  } else {
-    const key = subKey(node);
-    const next = new Set(expandedSubfolders.value);
-    next.has(key) ? next.delete(key) : next.add(key);
-    expandedSubfolders.value = next;
-  }
-}
 
 type Shade = 0 | 1;
+type CheckState = 'checked' | 'mixed' | 'unchecked';
+
+/// One folder node on screen: a root record's group or a lazily-known
+/// subfolder under it. `subPath` is relative to the root record — the
+/// backend's page addressing never carries absolute paths.
+interface FolderRef {
+  key: string;
+  name: string;
+  subPath: string;
+  root: RootRow;
+  isRoot: boolean;
+}
+
+/// A rendered row of the flat list. File rows carry their ancestor
+/// chain (root record → its own folder, node addresses root→parent):
+/// the leaf of coverage logic and removal splitting alike — a picked
+/// folder owns exactly the picked members whose chain contains it.
+type Row =
+  | {
+      kind: 'file';
+      file: SharedFile;
+      depth: number;
+      shade: Shade;
+      rootId: number | null;
+      chain: NodeAddress[];
+    }
+  | { kind: 'folder'; folder: FolderRef; depth: number; shade: Shade }
+  | { kind: 'marker'; failures: FailedAdd[]; depth: number; shade: Shade };
+
+/// Per-node paged feed: the rows already fetched (windows merged at
+/// their offsets), the materialization failures per fetched window
+/// (replaced on every window re-fetch, so resolved ones clear), and the
+/// fetch-ahead cursor. A collapsed node holds nothing.
+interface PageState {
+  key: string;
+  rootKey: string;
+  subPath: string;
+  rootId: number;
+  rows: NodePageRow[];
+  /// Failures seen per fetched window offset — the rendered `failures`
+  /// is their offset-ordered union.
+  windowFailures: Record<number, FailedAdd[]>;
+  failures: FailedAdd[];
+  fetchedThrough: number;
+  hasMore: boolean;
+  loading: boolean;
+}
+
+/// Expanded node pages by node key. `\u0000` joins the root key and the
+/// sub path, so any character a name can carry stays addressable.
+const pages = ref(new Map<string, PageState>());
+
+function nodeKey(rootKey: string, subPath: string) {
+  return subPath ? `${rootKey}\u0000${subPath}` : rootKey;
+}
+
+const rootFolder = (root: RootRow): FolderRef => ({
+  key: root.key,
+  name: root.name,
+  subPath: '',
+  root,
+  isRoot: true
+});
+
+function ensurePageState(folder: FolderRef): PageState {
+  let state = pages.value.get(folder.key);
+  if (!state) {
+    state = {
+      key: folder.key,
+      rootKey: folder.root.key,
+      subPath: folder.subPath,
+      rootId: folder.root.id,
+      rows: [],
+      windowFailures: {},
+      failures: [],
+      fetchedThrough: 0,
+      hasMore: false,
+      loading: false
+    };
+    pages.value.set(folder.key, state);
+  }
+  return state;
+}
+
+/// Merge one fetched page window into the node's feed at its offset:
+/// fetch-ahead appends, re-fetches after actions replace their window —
+/// either way rows never accumulate twice.
+function applyPage(key: string, page: PageWindow) {
+  const state = pages.value.get(key);
+  if (!state) return;
+
+  const rows = [...state.rows];
+  rows.length = Math.max(rows.length, page.offset + page.rows.length);
+  rows.splice(page.offset, page.rows.length, ...page.rows);
+  state.rows = rows;
+  state.fetchedThrough = Math.max(state.fetchedThrough, page.offset + page.rows.length);
+  state.hasMore = page.has_more;
+
+  // The refetched window replaces its recorded failures wholesale: a
+  // member that read fine this time loses a stale marker, a member that
+  // broke since gains one.
+  state.windowFailures[page.offset] = page.failures;
+  state.failures = Object.entries(state.windowFailures)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .flatMap(([, window]) => window);
+}
+
+/// Fetch one node window; the page request itself materializes the
+/// node's direct children (ADR-0005 — the listing IS the trigger).
+/// Returns the number of rows the window held, or null on failure —
+/// callers fetching sequences stop after a failure.
+async function fetchWindow(key: string, rootId: number, subPath: string, offset: number) {
+  const state = pages.value.get(key);
+  if (!state) return null;
+  state.loading = true;
+  try {
+    const page = await invoke<PageWindow>('list_page', {
+      rootId,
+      subPath,
+      offset,
+      limit: PAGE_SIZE
+    });
+    applyPage(key, page);
+    return page.rows.length;
+  } catch (e) {
+    shareError.value = String(e);
+    return null;
+  } finally {
+    state.loading = false;
+  }
+}
+
+/// Expansion: the first page fetch of a node is what materializes its
+/// direct children; a later re-expand refetches from the first offset
+/// over the store's idempotent registrations, so rows never duplicate.
+async function expandToPage(folder: FolderRef) {
+  const state = ensurePageState(folder);
+  if (state.fetchedThrough === 0 && !state.loading) {
+    await fetchWindow(folder.key, folder.root.id, folder.subPath, 0);
+  }
+}
+
+function isExpanded(folder: FolderRef) {
+  if (folder.isRoot) return expandedRoots.value.get(folder.key) ?? false;
+  return expandedSubfolders.value.has(folder.key);
+}
+
+/// Collapsing empties the node's page plus everything under it —
+/// unmaterialized subtrees are never held (issue #24). The `\u0000` and
+/// `/` boundaries keep pruning whole-segment exact: `Photos` cannot
+/// prune `Photos-2`.
+function pruneUnder(folder: FolderRef) {
+  const ownPrefix = folder.key + '\u0000';
+  const prefix = folder.isRoot ? ownPrefix : `${folder.key}/`;
+  for (const key of [...pages.value.keys()]) {
+    if (key === folder.key || key.startsWith(prefix)) pages.value.delete(key);
+  }
+  for (const key of [...expandedSubfolders.value]) {
+    if (key.startsWith(prefix)) expandedSubfolders.value.delete(key);
+  }
+}
+
+async function toggleFolder(folder: FolderRef) {
+  const open = !isExpanded(folder);
+
+  if (folder.isRoot) {
+    const next = new Map(expandedRoots.value);
+    next.set(folder.key, open);
+    expandedRoots.value = next;
+  } else {
+    const next = new Set(expandedSubfolders.value);
+    if (open) next.add(folder.key);
+    else next.delete(folder.key);
+    expandedSubfolders.value = next;
+  }
+
+  if (open) await expandToPage(folder);
+  else pruneUnder(folder);
+}
 
 /// Shading alternates per depth (ADR-0002): an expanded folder's whole
 /// region takes this shade, and a collapsed folder row falls back to
-/// the shade it inherited. The depth geometry of ADR-0004 (name-text
-/// indent, chevron carry, member catch-up) rides the rows separately.
+/// the shade it inherited.
 function expandedRegionShade(depth: number): Shade {
   return depth % 2 === 0 ? 1 : 0;
 }
 
-type Row =
-  | { kind: 'file'; file: SharedFile; depth: number; shade: Shade }
-  | { kind: 'folder'; node: FolderNode; depth: number; shade: Shade };
+/// The rows a node's page feeds render: materialized file rows,
+/// lazily-known subfolder rows (recursively, when expanded), and the
+/// node's inline materialization-failure marker last. `ancestors` —
+/// node addresses root→parent — rides along so file rows know which
+/// seeds cover them and removal can sweep them.
+function folderRows(
+  folder: FolderRef,
+  depth: number,
+  parentShade: Shade,
+  ancestors: NodeAddress[],
+  out: Row[]
+) {
+  const open = isExpanded(folder);
+  const shade: Shade = open ? expandedRegionShade(depth) : parentShade;
+  out.push({ kind: 'folder', folder, depth, shade });
 
-/// Tree rows carry their depth for the stylesheet (ADR-0004): the name
-/// text indents per level, the chevron moves with it, and member rows
-/// sit one level below their folder's name. Loose files carry no depth
-/// attributes and stay flush — same markup shape the web mirrors.
-function depthAttrs(row: Row): Record<string, string> {
-  const isTreeRow = row.kind === 'folder' || row.file.provenance !== null;
-  return isTreeRow
-    ? { style: `--depth:${row.depth}`, 'data-depth': String(row.depth) }
-    : {};
+  if (!open) return;
+
+  const state = pages.value.get(folder.key);
+  if (!state) return;
+
+  const regionShade = expandedRegionShade(depth);
+  // The member chain: this folder's own address ends it — a member's
+  // ancestors include the folder it sits in.
+  const chain = [...ancestors, { rootId: folder.root.id, subPath: folder.subPath }];
+  for (const pageRow of state.rows) {
+    if (pageRow.kind === 'file') {
+      out.push({
+        kind: 'file',
+        file: pageRow.file,
+        depth: depth + 1,
+        shade: regionShade,
+        rootId: folder.root.id,
+        chain
+      });
+    } else {
+      const subPath = folder.subPath ? `${folder.subPath}/${pageRow.name}` : pageRow.name;
+      folderRows(
+        {
+          key: nodeKey(folder.root.key, subPath),
+          name: pageRow.name,
+          subPath,
+          root: folder.root,
+          isRoot: false
+        },
+        depth + 1,
+        regionShade,
+        chain,
+        out
+      );
+    }
+  }
+
+  if (state.failures.length > 0) {
+    out.push({ kind: 'marker', failures: state.failures, depth: depth + 1, shade: regionShade });
+  }
 }
 
-function folderRows(node: FolderNode, parentShade: Shade): Row[] {
-  const open = isExpanded(node);
-  const shade: Shade = open ? expandedRegionShade(node.depth) : parentShade;
-  const out: Row[] = [{ kind: 'folder', node, depth: node.depth, shade }];
-
-  if (!open) return out;
-
-  // Members sit one level below the folder that stores them — same
-  // depth the mirror (listing.rs) stamps them with.
-  for (const file of node.files) out.push({ kind: 'file', file, depth: node.depth + 1, shade });
-  for (const child of node.children) out.push(...folderRows(child, shade));
-  return out;
-}
-
+/// The flat list: loose files lead, then one collapsed group per root
+/// record. Anything lazily-known renders only through pages of expanded
+/// nodes — display never registers content (issue #24).
 const rows = computed<Row[]>(() => {
-  const { loose, roots } = tree.value;
-  return [
-    ...loose.map((file): Row => ({ kind: 'file', file, depth: 0, shade: 0 })),
-    ...roots.flatMap((root): Row[] => folderRows(root, 0))
-  ];
+  const out: Row[] = [];
+  for (const file of loose.value) {
+    out.push({ kind: 'file', file, depth: 0, shade: 0, rootId: null, chain: [] });
+  }
+  for (const root of roots.value) {
+    folderRows(rootFolder(root), 0, 0, [], out);
+  }
+  return out;
 });
 
-const allSelected = computed(
-  () => files.value.length > 0 && selectedIds.value.length === files.value.length
+const rootCounts = computed(() => {
+  const counts = new Map<string, number>();
+  for (const root of roots.value) counts.set(root.key, root.file_count);
+  return counts;
+});
+
+// -- selection -----------------------------------------------------------
+
+const renderedFileIds = computed(() =>
+  rows.value.flatMap((row) => (row.kind === 'file' ? [row.file.id] : []))
 );
 
-const someSelected = computed(() => selectedIds.value.length > 0 && !allSelected.value);
-const selectedCount = computed(() => selectedIds.value.length);
+/// Which node chain (root record → its own folder) a known file id
+/// hangs under — the checkbox states read click coverage from it, and
+/// removal splitting sweeps ids a node removal already covers. Loose
+/// files carry no chain.
+const fileOwners = computed(() => {
+  const owners = new Map<number, NodeAddress[]>();
+  for (const row of rows.value) {
+    if (row.kind === 'file') owners.set(row.file.id, row.chain);
+  }
+  return owners;
+});
 
-watch(
-  () => files.value.map((file) => file.id),
-  (fileIds) => {
-    selectedIds.value = selectedIds.value.filter((id) => fileIds.includes(id));
-  },
-  { immediate: true }
-);
+watch(renderedFileIds, (ids) => {
+  if (selectedIds.value.some((id) => !ids.includes(id))) {
+    selectedIds.value = selectedIds.value.filter((id) => ids.includes(id));
+  }
+});
+
+watch(roots, (nextRoots) => {
+  // Removals prune their records' node selections; the record's own
+  // removal (via remove_root) can only come from user actions and run
+  // outcomes, so a selection must never outlive its record.
+  const ids = new Set(nextRoots.map((root) => root.id));
+  if ([...selectedNodes.value.values()].some((node) => !ids.has(node.rootId))) {
+    selectedNodes.value = new Map(
+      [...selectedNodes.value].filter(([, node]) => ids.has(node.rootId))
+    );
+  }
+});
 
 function isSelected(id: number) {
   return selectedIds.value.includes(id);
 }
 
+/// Whether one node address is a selected ancestor of a row chain: the
+/// group rule (ADR-0006 — selection resolves through the node) carried
+/// to every depth. A covered row shows the tick on the selection's
+/// behalf and its own checkbox goes inert:
+/// flipping a covered member off isn't representable (there are no
+/// exclusions to a node selection); the covering checkbox is the way
+/// to label finer intent. Files with no chain are never covered.
+function isCovered(chain: NodeAddress[]): boolean {
+  return chain.some((address) =>
+    selectedNodes.value.has(nodeSelKey(address.rootId, address.subPath))
+  );
+}
+
+/// Whether the folder row itself is covered — an ancestor node is
+/// selected above it — derived from addresses, not rendering order. A
+/// record's own node has no ancestors: the root selection shows on its
+/// own checkbox, never as coverage of it.
+function isCoveredFolder(folder: FolderRef): boolean {
+  if (folder.subPath === '') return false;
+  if (selectedNodes.value.has(nodeSelKey(folder.root.id, ''))) return true;
+  const segments = folder.subPath.split('/');
+  for (let end = 1; end < segments.length; end += 1) {
+    if (selectedNodes.value.has(nodeSelKey(folder.root.id, segments.slice(0, end).join('/')))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The tick a rendered file row shows: its own pick, or the covering
+/// selection's.
+function rowSelected(id: number): boolean {
+  return isSelected(id) || isCovered(fileOwners.value.get(id) ?? []);
+}
+
+/// Toggle one member's own pick — covered members are inert: the click
+/// reaches here through the whole row too, not only the checkbox.
 function toggleFile(id: number) {
   if (isSelected(id)) {
     selectedIds.value = selectedIds.value.filter((selectedId) => selectedId !== id);
-  } else {
+  } else if (!isCovered(fileOwners.value.get(id) ?? [])) {
     selectedIds.value = [...selectedIds.value, id];
   }
 }
 
-/// Cosmetic grouping: selection always operates on individual file ids,
-/// so folder rows toggle their whole subtree in bulk but own nothing
-/// themselves — members hidden inside collapsed subfolders included.
-function nodeMemberIds(node: FolderNode): number[] {
-  return [
-    ...node.files.map((file) => file.id),
-    ...node.children.flatMap((child) => nodeMemberIds(child))
-  ];
-}
+/// Checkbox states for every rendered folder row — root group and lazy
+/// subfolder alike (issue #29): true when the node itself is selected
+/// or an ancestor's selection covers it, mixed when some rendered
+/// member participates on its own (a member's own pick, or a picked
+/// node within), false otherwise. Member and node picks never turn
+/// each other on; the state only ever mirrors the selection — the same
+/// rule the receiver page's script derives from addresses.
+const nodeChecks = computed(() => {
+  const states = new Map<string, CheckState>();
+  const allRows = rows.value;
+  for (let index = 0; index < allRows.length; index += 1) {
+    const row = allRows[index];
+    if (row.kind !== 'folder') continue;
+    const folder = row.folder;
 
-type CheckState = 'checked' | 'mixed' | 'unchecked';
+    if (
+      selectedNodes.value.has(nodeSelKey(folder.root.id, folder.subPath)) ||
+      isCoveredFolder(folder)
+    ) {
+      states.set(folder.key, 'checked');
+      continue;
+    }
 
-function nodeCheckState(node: FolderNode): CheckState {
-  const memberIds = nodeMemberIds(node);
-
-  if (memberIds.every((id) => selectedIds.value.includes(id))) return 'checked';
-  if (memberIds.some((id) => selectedIds.value.includes(id))) return 'mixed';
-  return 'unchecked';
-}
-
-/// Each folder row's check state, computed once per row — the folder
-/// checkboxes need it for both their aria-checked and their icon.
-const folderCheckStates = computed(() => {
-  const states = new Map<FolderNode, CheckState>();
-
-  for (const row of rows.value) {
-    if (row.kind === 'folder') states.set(row.node, nodeCheckState(row.node));
+    // Rendered members deeper than this row until the next shallower
+    // one: participation on their own keeps the flat-tree walk honest —
+    // covered members carry no own pick, so they never mix a folder.
+    let memberPicked = false;
+    depth: for (let later = index + 1; later < allRows.length; later += 1) {
+      const deeper = allRows[later];
+      if (deeper.depth === undefined || deeper.depth <= row.depth) break;
+      if (deeper.kind === 'file' && isSelected(deeper.file.id)) {
+        memberPicked = true;
+        break depth;
+      }
+      if (
+        deeper.kind === 'folder' &&
+        selectedNodes.value.has(nodeSelKey(deeper.folder.root.id, deeper.folder.subPath))
+      ) {
+        memberPicked = true;
+        break depth;
+      }
+    }
+    states.set(folder.key, memberPicked ? 'mixed' : 'unchecked');
   }
-
   return states;
 });
 
-/// The checkbox's exact aria-checked spelling for a check state; a row
-/// missing from the map (it is not a folder row) reads as unchecked.
-function checkStateAria(state: CheckState | undefined) {
-  return state === 'checked' ? 'true' : state === 'mixed' ? 'mixed' : 'false';
+function checkAria(state: CheckState | undefined) {
+  const check = state ?? 'unchecked';
+  return check === 'checked' ? 'true' : check === 'mixed' ? 'mixed' : 'false';
 }
 
-function toggleNode(node: FolderNode) {
-  const memberIds = nodeMemberIds(node);
+/// Toggle one node's pick — covered rows are inert (the click reaches
+/// here through the whole row too): uncheck the covering selection
+/// instead. Unchecking drops the subtree's member picks and nested
+/// node selections, at address level — beyond what any page has
+/// rendered, the rule the receiver page's uncheck carries.
+function toggleNode(folder: FolderRef) {
+  if (isCoveredFolder(folder)) return;
+  const ownKey = nodeSelKey(folder.root.id, folder.subPath);
 
-  if (nodeCheckState(node) === 'checked') {
-    selectedIds.value = selectedIds.value.filter((id) => !memberIds.includes(id));
+  if (selectedNodes.value.has(ownKey)) {
+    const membersUnder = [...fileOwners.value]
+      .filter(([, chain]) =>
+        chain.some(
+          (address) => address.rootId === folder.root.id && address.subPath === folder.subPath
+        )
+      )
+      .map(([id]) => id);
+    selectedIds.value = selectedIds.value.filter((id) => !membersUnder.includes(id));
+
+    const prefix = folder.subPath ? `${folder.subPath}/` : '';
+    selectedNodes.value = new Map(
+      [...selectedNodes.value].filter(
+        ([key, address]) =>
+          // A different record's selection always stays; this record's
+          // own address goes, and for the root '' every nested
+          // selection under it goes with the whole subtree.
+          address.rootId !== folder.root.id ||
+          !(key === ownKey || address.subPath.startsWith(prefix))
+      )
+    );
   } else {
-    const unselected = memberIds.filter((id) => !selectedIds.value.includes(id));
-    selectedIds.value = [...selectedIds.value, ...unselected];
+    const next = new Map(selectedNodes.value);
+    next.set(ownKey, { rootId: folder.root.id, subPath: folder.subPath });
+    selectedNodes.value = next;
   }
 }
 
-/// Rows show the file's own name; where it hangs under the root is the
-/// tree's job now. The full path stays in the row title.
-function rowTitle(row: Row) {
-  if (row.kind === 'file') return row.file.path;
-  return row.node.subPath
-    ? `${row.node.folderRoot}/${row.node.subPath}`
-    : row.node.folderRoot;
-}
+const allSelected = computed(
+  () =>
+    renderedFileIds.value.length + roots.value.length > 0 &&
+    selectedIds.value.length === renderedFileIds.value.length &&
+    roots.value.every((root) => selectedNodes.value.has(nodeSelKey(root.id, '')))
+);
+const someSelected = computed(
+  () => (selectedIds.value.length > 0 || selectedNodes.value.size > 0) && !allSelected.value
+);
+const selectedCount = computed(() => selectedIds.value.length + selectedNodes.value.size);
 
 function toggleAll() {
-  selectedIds.value = allSelected.value ? [] : files.value.map((file) => file.id);
+  if (allSelected.value) {
+    selectedIds.value = [];
+    selectedNodes.value = new Map();
+  } else {
+    // Everything the list can see: rendered materialized ids and every
+    // root's node address. Lazily-known rows nobody opened stay out —
+    // selection never materializes content it hasn't shown.
+    selectedIds.value = [...renderedFileIds.value];
+    selectedNodes.value = new Map(
+      roots.value.map((root) => [nodeSelKey(root.id, ''), { rootId: root.id, subPath: '' }])
+    );
+  }
 }
+
+// -- removal -------------------------------------------------------------
 
 function removeOne(id: number) {
   selectedIds.value = selectedIds.value.filter((selectedId) => selectedId !== id);
@@ -214,16 +524,111 @@ function removeOne(id: number) {
 }
 
 function removeSelected() {
-  if (!selectedIds.value.length) return;
+  if (!selectedCount.value) return;
 
-  const ids = [...selectedIds.value];
+  // Snapshot the split before clearing: whole root groups through
+  // remove_root (record plus every materialized member), subfolder
+  // nodes through remove_node (their registered members, record and
+  // count both), and stray ids through remove_file. Member ids under a
+  // selected node are swept by that node's own removal — their chain
+  // holds one of the addresses going away.
+  const selections = [...selectedNodes.value.values()];
+  const rootIds = selections.filter((node) => node.subPath === '').map((node) => node.rootId);
+  const nodes = selections.filter((node) => node.subPath !== '');
+  const resisting = new Set(selectedNodes.value.keys());
+  const fileIds = selectedIds.value.filter((id) => {
+    const chain = fileOwners.value.get(id) ?? [];
+    return !chain.some((address) => resisting.has(nodeSelKey(address.rootId, address.subPath)));
+  });
+
   selectedIds.value = [];
-  removeMany(ids);
+  selectedNodes.value = new Map();
+
+  if (rootIds.length > 0 || nodes.length > 0 || fileIds.length > 0) {
+    removeSelection(fileIds, rootIds, nodes);
+  }
+}
+
+// -- fetch-ahead (infinite scroll, ADR-0006) -----------------------------
+
+const listElement = ref<HTMLElement | null>(null);
+
+/// Near the end of the container, every expanded node with a further
+/// page pulls its next window, so the tail is seamless wherever it
+/// lands — the hold stays bounded: at most one extra page-budget
+/// window per expanded node (ADR-0006's page budget), and collapsed
+/// nodes hold nothing. Selection and expansion ride untouched.
+async function fetchAhead() {
+  for (const state of [...pages.value.values()]) {
+    if (!state.hasMore || state.loading) continue;
+    await fetchWindow(state.key, state.rootId, state.subPath, state.fetchedThrough);
+  }
+}
+
+function onScroll() {
+  const element = listElement.value;
+  if (!element) return;
+  const nearEnd =
+    element.scrollTop + element.clientHeight >= element.scrollHeight - FETCH_AHEAD_PX;
+  if (nearEnd) void fetchAhead();
+}
+
+// -- re-truthfulness after actions ---------------------------------------
+
+/// Every action ends in a re-read (the composable's refresh bumps
+/// `contentVersion`): re-fetch the covered windows of each expanded
+/// node so pages can't drift from the store, then trim the tail — a
+/// removed root's nodes lose their pages entirely.
+async function refetchCoveredWindows() {
+  for (const state of [...pages.value.values()]) {
+    if (!roots.value.some((root) => root.key === state.rootKey)) {
+      pages.value.delete(state.key);
+      continue;
+    }
+
+    let covered = 0;
+    let failed = false;
+    for (let offset = 0; offset < state.fetchedThrough && !failed; offset += PAGE_SIZE) {
+      const count = await fetchWindow(state.key, state.rootId, state.subPath, offset);
+      if (count === null) failed = true;
+      else covered = Math.max(covered, offset + count);
+    }
+
+    const fresh = pages.value.get(state.key);
+    // One node's failed window must not veto the others' refresh — the
+    // error banner carries what went wrong, and this node keeps its
+    // previous rows rather than being wiped by a transient failure.
+    if (!fresh || failed) continue;
+
+    // The refetched total may have shrunk below the old fetch (content
+    // removed elsewhere, or emptied entirely): trim the tail to what
+    // the pass actually covered so rows can't outlive the store.
+    fresh.rows.length = covered;
+    fresh.fetchedThrough = covered;
+  }
+}
+
+watch(contentVersion, () => {
+  void refetchCoveredWindows();
+});
+
+// -- inline display helpers ----------------------------------------------
+
+function markerText(count: number) {
+  return `${count} item${count === 1 ? '' : 's'} of this folder couldn't be read`;
+}
+
+function markerTitle(failures: FailedAdd[]) {
+  return failures.map((failure) => `${failure.path} — ${failure.error}`).join('\n');
+}
+
+function folderCountText(count: number | undefined) {
+  return count === undefined ? '' : `${count} ${count === 1 ? 'file' : 'files'}`;
 }
 </script>
 
 <template>
-  <section v-if="files.length" class="file-table" aria-label="Shared files" :aria-busy="busy">
+  <section class="file-table" :aria-busy="busy">
     <div class="files-header" role="row">
       <button
         class="checkbox-control"
@@ -251,62 +656,70 @@ function removeSelected() {
       </button>
     </div>
 
-    <ul class="file-rows thin-scrollbar" role="rowgroup">
-      <template v-for="row in rows" :key="row.kind === 'file' ? row.file.id : `${row.node.folderRoot}/${row.node.subPath}`">
+    <ul ref="listElement" class="file-rows thin-scrollbar" role="rowgroup" @scroll="onScroll">
+      <template
+        v-for="row in rows"
+        :key="row.kind === 'file' ? `f-${row.file.id}` : row.kind === 'folder' ? `d-${row.folder.key}` : `m-${row.depth}-${row.failures.map((failure) => failure.path).join('|')}`"
+      >
         <li
           v-if="row.kind === 'folder'"
           class="folder-row"
           role="row"
-          v-bind="depthAttrs(row)"
           :class="{ 'shade-1': row.shade === 1 }"
-          :title="rowTitle(row)"
+          :style="{ '--depth': String(row.depth) }"
+          :data-depth="String(row.depth)"
         >
           <button
             class="checkbox-control"
             type="button"
             role="checkbox"
-            :aria-checked="checkStateAria(folderCheckStates.get(row.node))"
-            :aria-label="`Select or deselect all files in ${row.node.name}`"
-            :disabled="busy"
-            @click="toggleNode(row.node)"
+            :aria-checked="checkAria(nodeChecks.get(row.folder.key))"
+            :aria-label="`Select or deselect all files in ${row.folder.name}`"
+            :disabled="busy || isCoveredFolder(row.folder)"
+            @click.stop="toggleNode(row.folder)"
           >
-            <CheckedIcon v-if="folderCheckStates.get(row.node) === 'checked'" />
+            <CheckedIcon v-if="nodeChecks.get(row.folder.key) === 'checked'" />
             <UncheckedIcon v-else />
           </button>
 
           <button
             class="folder-chevron"
-            :class="{ 'is-collapsed': !isExpanded(row.node) }"
+            :class="{ 'is-collapsed': !isExpanded(row.folder) }"
             type="button"
-            :aria-expanded="isExpanded(row.node) ? 'true' : 'false'"
-            :aria-label="`${isExpanded(row.node) ? 'Collapse' : 'Expand'} ${row.node.name}`"
-            @click="toggleFolder(row.node)"
+            :aria-expanded="isExpanded(row.folder) ? 'true' : 'false'"
+            :aria-label="`${isExpanded(row.folder) ? 'Collapse' : 'Expand'} ${row.folder.name}`"
+            @click="toggleFolder(row.folder)"
           >
             <ChevronIcon />
           </button>
 
-          <span class="folder-name">{{ row.node.name }}</span>
+          <span class="folder-name">{{ row.folder.name }}</span>
+
+          <small v-if="row.folder.isRoot" class="folder-count">
+            {{ folderCountText(rootCounts.get(row.folder.key)) }}
+          </small>
         </li>
 
         <li
-          v-else
+          v-else-if="row.kind === 'file'"
           class="file-row"
-          :class="{ 'is-selected': isSelected(row.file.id), 'shade-1': row.shade === 1 }"
-          :title="rowTitle(row)"
-          v-bind="depthAttrs(row)"
+          :class="{ 'is-selected': rowSelected(row.file.id), 'shade-1': row.shade === 1 }"
+          :title="row.file.path"
+          :style="row.rootId !== null ? { '--depth': String(row.depth) } : undefined"
+          :data-depth="row.rootId !== null ? String(row.depth) : undefined"
           role="row"
-          :aria-selected="isSelected(row.file.id)"
+          :aria-selected="rowSelected(row.file.id)"
           @click="toggleFile(row.file.id)"
         >
           <button
             type="button"
             role="checkbox"
-            :aria-checked="isSelected(row.file.id)"
+            :aria-checked="rowSelected(row.file.id)"
             :aria-label="`${isSelected(row.file.id) ? 'Deselect' : 'Select'} ${row.file.name}`"
-            :disabled="busy"
+            :disabled="busy || isCovered(fileOwners.get(row.file.id) ?? [])"
             @click.stop="toggleFile(row.file.id)"
           >
-            <CheckedIcon v-if="isSelected(row.file.id)" />
+            <CheckedIcon v-if="rowSelected(row.file.id)" />
             <UncheckedIcon v-else />
           </button>
 
@@ -321,12 +734,29 @@ function removeSelected() {
             <TrashIcon />
           </button>
         </li>
+
+        <li
+          v-else
+          class="materialize-marker"
+          role="row"
+          :class="{ 'shade-1': row.shade === 1 }"
+          :style="{ '--depth': String(row.depth) }"
+          :data-depth="String(row.depth)"
+          :aria-label="markerText(row.failures.length)"
+          :title="markerTitle(row.failures)"
+        >
+          <span aria-hidden="true" class="checkbox-spacer"></span>
+          <p class="marker-text">{{ markerText(row.failures.length) }}</p>
+        </li>
       </template>
     </ul>
   </section>
 </template>
 
 <style scoped>
+/* Row layout matches the pre-paged lists: the header and member rows
+   share one 38px strip; folder rows keep their checkbox and chevron
+   columns, with the counted total parked at the far end. */
 .file-table {
   width: 100%;
   overflow: hidden;
@@ -341,8 +771,8 @@ function removeSelected() {
   grid-template-columns: 32px minmax(0, 1fr) 32px;
   align-items: center;
   column-gap: 4px;
-  /* Files match the folder row height now (ADR-0004 revision): the
-     38px strip is the shared row height, header included. */
+  /* Files match the folder row height (ADR-0004 revision): the 38px
+     strip is the shared row height, header included. */
   min-height: 38px;
   padding: 0 10px;
 }
@@ -392,21 +822,9 @@ function removeSelected() {
   font-size: 0.875rem;
 }
 
-.folder-name {
-  padding-left: calc(16px * var(--depth, 0));
-}
-
-.folder-chevron {
-  margin-left: calc(16px * var(--depth, 0));
-}
-
-.file-row[data-depth] .file-name {
-  padding-left: calc(16px * var(--depth, 0) + 36px);
-}
-
 .folder-row {
   display: grid;
-  grid-template-columns: 32px 32px minmax(0, 1fr);
+  grid-template-columns: 32px 32px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 4px;
   min-height: 38px;
@@ -421,6 +839,15 @@ function removeSelected() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding-left: calc(16px * var(--depth, 0));
+}
+
+.folder-chevron {
+  margin-left: calc(16px * var(--depth, 0));
+}
+
+.file-row[data-depth] .file-name {
+  padding-left: calc(16px * var(--depth, 0) + 36px);
 }
 
 .folder-chevron svg {
@@ -438,6 +865,45 @@ function removeSelected() {
   .folder-chevron svg {
     transition: none;
   }
+}
+
+/* The root row also carries its counted file total — display only;
+   showing it materializes nothing (issue #24, first box). */
+.folder-count {
+  justify-self: end;
+  padding-left: 8px;
+  color: var(--ink);
+  opacity: 0.6;
+  font-size: 0.6875rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.materialize-marker {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 4px;
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 0.8125rem;
+  line-height: 1.2;
+}
+
+.marker-text {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  opacity: 0.65;
+  font-style: italic;
+  padding-left: calc(16px * var(--depth, 0) + 36px);
+}
+
+.checkbox-spacer {
+  display: block;
 }
 
 .file-row:hover,
